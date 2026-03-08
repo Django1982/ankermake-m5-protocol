@@ -34,8 +34,12 @@ RUN groupadd -g ${GID} ankerctl && \
     chown -R ankerctl:ankerctl /home/ankerctl
 
 RUN apt-get update && \
-    apt-get install -y --no-install-recommends ffmpeg && \
+    apt-get install -y --no-install-recommends ffmpeg gosu && \
     rm -rf /var/lib/apt/lists/*
+
+# Copy the entrypoint script
+COPY entrypoint.sh /app/entrypoint.sh
+RUN chmod +x /app/entrypoint.sh
 
 # Copy the script and libraries
 COPY --chown=ankerctl:ankerctl ankerctl.py /app/
@@ -53,8 +57,8 @@ STOPSIGNAL SIGINT
 HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
     CMD python3 -c "import urllib.request, os; h=os.getenv('FLASK_HOST','127.0.0.1'); h='127.0.0.1' if h in ('0.0.0.0','::','') else h; urllib.request.urlopen('http://'+h+':'+os.getenv('FLASK_PORT','4470')+'/api/health',timeout=4)" 2>/dev/null || exit 1
 
-# Run as non-root user
-USER ankerctl
+# Note: We run as root for the entrypoint script to fix permissions,
+# then switch to ankerctl user via gosu in the entrypoint
 
-ENTRYPOINT ["/app/ankerctl.py"]
-CMD ["webserver", "run"]
+ENTRYPOINT ["/app/entrypoint.sh"]
+CMD ["/app/ankerctl.py", "webserver", "run"]
