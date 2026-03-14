@@ -1,7 +1,7 @@
 import json
 import os
 from datetime import datetime
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, MISSING
 from platformdirs import PlatformDirs
 from libflagship.util import unhex, enhex
 
@@ -95,7 +95,11 @@ class Serialize:
     def from_dict(cls, data):
         res = {}
         for k, v in cls.__dataclass_fields__.items():
-            res[k] = data[k]
+            if (k not in data) and (v.default is not MISSING):
+                # prevent KeyErrors if there is a default value
+                res[k] = v.default
+            else:
+                res[k] = data[k]
             if v.type == bytes:
                 res[k] = unhex(res[k])
             elif v.type == datetime:
