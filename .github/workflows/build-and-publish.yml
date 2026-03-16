@@ -81,7 +81,7 @@ jobs:
             .
 
       - name: Upload source release artifacts
-        uses: actions/upload-artifact@v6
+        uses: actions/upload-artifact@v7
         with:
           name: release-source
           path: release/ankerctl-${{ github.ref_name }}.*
@@ -155,7 +155,7 @@ jobs:
           Compress-Archive -Path dist/ankerctl -DestinationPath "release/${{ matrix.archive_name }}"
 
       - name: Upload native bundle
-        uses: actions/upload-artifact@v6
+        uses: actions/upload-artifact@v7
         with:
           name: release-${{ matrix.target }}
           path: release/${{ matrix.archive_name }}
