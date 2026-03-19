@@ -84,6 +84,11 @@ def test_video_queue_worker_start_stop_and_handler(monkeypatch):
     queue.saved_video_profile_id = "hd"
     queue.last_frame_at = None
     queue._live_started_at = None
+    queue._last_live_refresh_at = 0.0
+    queue._last_no_frame_log_at = 0.0
+    queue._last_start_live_at = 0.0
+    queue._live_active = False
+    queue.api_id = None
     queue._enable_generation = 0
     notifications = []
     queue.notify = lambda msg: notifications.append(msg)
