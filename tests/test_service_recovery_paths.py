@@ -125,7 +125,7 @@ def test_video_queue_worker_start_stop_and_handler(monkeypatch):
         app.svc = old_svc
 
     assert queue.pppp is None
-    assert queue.api_id == id(fake_api)
+    assert queue.api_id is None
     assert puts == ["pppp"]
     assert len(commands) == 4
     assert queue.last_frame_at == 123.0
