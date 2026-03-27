@@ -277,3 +277,35 @@ def test_build_payload_get_state_and_simulate_event(monkeypatch):
     assert state_before["print"]["active"] is True
     assert queue.get_state()["debug_logging"] is True
     assert [call[0] for call in history_calls[-3:]] == ["start", "finish", "fail"]
+
+
+def test_out_of_order_ct1001_before_ct1000():
+    """ct=1001 (progress) arriving before ct=1000 (state=1) must not
+    produce duplicate history records or duplicate PRINT_STARTED events.
+    The consolidated _transition_to_active() guards against this."""
+    global ha_updates, history_calls, timelapse_calls, events
+    ha_updates, history_calls, timelapse_calls, events = [], [], [], []
+    queue = _queue()
+
+    # Progress arrives first (out of order) — should activate print
+    queue._handle_notification({
+        "commandType": 1001,
+        "progress": 2500,       # 25% on the 0-10000 scale
+        "name": "cube.gcode",
+    })
+
+    assert queue._print_active is True
+    start_events = [e for e in events if e[0] == "print_started"]
+    start_records = [c for c in history_calls if c[0] == "start"]
+    assert len(start_events) == 1, f"Expected 1 start event, got {len(start_events)}"
+    assert len(start_records) == 1, f"Expected 1 history start, got {len(start_records)}"
+
+    # State change arrives later — should be a no-op (already active)
+    events.clear()
+    history_calls.clear()
+    queue._handle_notification({"commandType": 1000, "value": 1})
+
+    late_start_events = [e for e in events if e[0] == "print_started"]
+    late_start_records = [c for c in history_calls if c[0] == "start"]
+    assert len(late_start_events) == 0, "ct=1000 should not fire a second start event"
+    assert len(late_start_records) == 0, "ct=1000 should not record a second history start"

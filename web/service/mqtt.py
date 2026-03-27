@@ -95,6 +95,38 @@ class MqttQueue(Service):
         if not hasattr(self, "_debug_log_payloads"):
              self._debug_log_payloads = False
 
+    def _transition_to_active(self, payload, progress, filename=None):
+        """Activate print state.  No-op if already active.
+
+        Both the ct=1000 (state change) and ct=1001 (progress) handlers call
+        this so print activation logic lives in exactly one place.  Returns
+        True if the print was activated, False if already active.
+        """
+        if self._print_active:
+            return False
+
+        self._pending_print_start = False
+        self._print_active = True
+        self._print_started_at = time.monotonic()
+        self._failure_sent = False
+        self._last_progress_bucket = None
+
+        effective_filename = filename or self._last_filename
+
+        if effective_filename:
+            self._history.record_start(effective_filename, task_id=self._last_task_id)
+            self._pending_history_start = False
+            log.info(f"Print started, filename={effective_filename!r}")
+        else:
+            self._pending_history_start = True
+            log.info("Print started, history deferred (no filename yet)")
+
+        self._timelapse.start_capture(effective_filename or "unknown")
+        self._ha.update_state(print_status="printing")
+        self._send_event(EVENT_PRINT_STARTED, self._build_payload(payload, progress))
+
+        return True
+
     @property
     def is_printing(self):
         return self._print_active
@@ -529,26 +561,8 @@ class MqttQueue(Service):
             was_preparing_print = self.is_preparing_print
             was_pending_start = self._pending_print_start
             self._last_state_value = value
-            if value == 1 and not self._print_active:
-                self._pending_print_start = False
-                # Print is now running
-                self._print_active = True
-                self._print_started_at = time.monotonic()
-                self._failure_sent = False
-                self._last_progress_bucket = None
-                log.info(f"History: print started (ct 1000 value=1), filename={self._last_filename!r}")
-                if self._last_filename:
-                    self._history.record_start(self._last_filename, task_id=self._last_task_id)
-                    self._pending_history_start = False
-                else:
-                    # ct=1044 (filename) has not arrived yet — defer record_start
-                    self._pending_history_start = True
-                self._timelapse.start_capture(self._last_filename or "unknown")
-                self._ha.update_state(print_status="printing")
-                self._send_event(
-                    EVENT_PRINT_STARTED,
-                    self._build_payload(payload, 0),
-                )
+            if value == 1:
+                self._transition_to_active(payload, progress=0)
             elif value == 0 and (self._print_active or was_preparing_print or was_pending_start):
                 if self._print_active:
                     if self._stop_requested:
@@ -669,23 +683,7 @@ class MqttQueue(Service):
             return
 
         if 0 < progress < 100 and not self._print_active:
-            self._pending_print_start = False
-            self._print_active = True
-            self._print_started_at = time.monotonic()
-            self._failure_sent = False
-            self._last_progress_bucket = None
-            self._send_event(
-                EVENT_PRINT_STARTED,
-                self._build_payload(payload, progress),
-            )
-            effective_filename = filename or self._last_filename
-            if effective_filename:
-                self._history.record_start(effective_filename, task_id=task_id)
-                self._pending_history_start = False
-            else:
-                self._pending_history_start = True
-            self._timelapse.start_capture(effective_filename or "unknown")
-            self._ha.update_state(print_status="printing")
+            self._transition_to_active(payload, progress, filename=filename)
 
         status_text = self._extract_status_text(payload)
         if self._print_active and status_text:
