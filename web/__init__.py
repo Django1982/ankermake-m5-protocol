@@ -53,6 +53,7 @@ class _AccessLogNoiseFilter(logging.Filter):
         '"GET /api/printer/runtime-state',
         '"GET /api/camera/frame',
         '"GET /api/camera/stream',
+        '"GET /api/camera/printer-stream',
         '"GET /api/filaments/service/swap',
     )
 
@@ -404,6 +405,30 @@ def _resolve_camera_settings(cfg=None, printer_index=None):
     return web.camera.resolve_camera_settings(cfg, printer_index=printer_index)
 
 
+def _camera_settings_for_response(camera_config):
+    camera_payload = json.loads(json.dumps(camera_config or {}))
+    integration = dict(camera_payload.get("integration") or {})
+    printer_index = camera_payload.get("printer_index", app.config.get("printer_index", 0))
+    base_url = request.host_url.rstrip("/") if has_request_context() else ""
+    integration["endpoint_path"] = web.camera.build_printer_integration_stream_url(
+        "",
+        printer_index=printer_index,
+    )
+    integration["endpoint_url"] = web.camera.build_printer_integration_stream_url(
+        base_url,
+        printer_index=printer_index,
+    )
+    integration["endpoint_url_with_api_key"] = web.camera.build_printer_integration_stream_url(
+        base_url,
+        api_key=app.config.get("api_key"),
+        printer_index=printer_index,
+    )
+    integration["stream_format"] = "H.264 / fragmented MP4 (ffmpeg remux)"
+    integration["ffmpeg_available"] = _ffmpeg_available()
+    camera_payload["integration"] = integration
+    return camera_payload
+
+
 def _camera_feature_available(cfg=None, printer_index=None):
     camera_settings = _resolve_camera_settings(cfg, printer_index=printer_index)
     return bool(camera_settings.get("feature_available"))
@@ -411,6 +436,8 @@ def _camera_feature_available(cfg=None, printer_index=None):
 
 def _requested_printer_index(default=None):
     fallback = app.config.get("printer_index", 0) if default is None else default
+    if fallback is None:
+        fallback = 0
     if not has_request_context():
         return fallback
     raw = request.args.get("printer_index", default=fallback, type=int)
@@ -1094,7 +1121,7 @@ FILAMENT_SWAP_ADVANCED_CONFIG_DEFAULT = {
     "commands": {
         "set_nozzle_temp": "M104 S{temp_c}",
         "cooldown_nozzle": "M104 S0",
-        "home_all": "native:home_all",
+        "home_all": "native:home_z",
         "relative_mode": "G91",
         "z_lift": "G1 Z{z_lift_mm} F{z_feedrate}",
         "wait_for_moves": "M400",
@@ -1249,6 +1276,15 @@ def _coerce_filament_swap_command(value):
     return str(value or "")
 
 
+def _migrate_filament_swap_command(command_name, command_value):
+    command_name = str(command_name or "")
+    command_value = _coerce_filament_swap_command(command_value)
+    normalized = command_value.strip().lower()
+    if command_name == "home_all" and normalized in {"native:home_all", "native:all"}:
+        return "native:home_z"
+    return command_value
+
+
 def _coerce_filament_swap_setting(value, default):
     if isinstance(default, bool):
         return _filament_service_bool(value)
@@ -1275,7 +1311,11 @@ def _merge_filament_swap_advanced_config(loaded):
     user_commands = loaded.get("commands") or {}
     if isinstance(user_commands, dict):
         for key, value in user_commands.items():
-            commands[str(key)] = _coerce_filament_swap_command(value)
+            key = str(key)
+            migrated_command = _migrate_filament_swap_command(key, value)
+            if commands.get(key) != migrated_command:
+                changed = True
+            commands[key] = migrated_command
     else:
         changed = True
     if merged.get("commands") != commands:
@@ -1873,7 +1913,8 @@ def _run_legacy_swap_unload(token):
                 printer_index=printer_index,
                 phase="homing",
                 message=(
-                    f"Homing all axes before filament swap. Waiting {home_pause_s:g}s before raising Z."
+                    f"Running the native Home Z quick-home sequence before filament swap. "
+                    f"Waiting {home_pause_s:g}s before raising Z."
                 ),
                 home_pause_started_at=home_pause_started_at,
                 home_pause_until=home_pause_started_at + max(0.0, float(home_pause_s or 0.0)),
@@ -3273,7 +3314,7 @@ def app_api_settings_camera():
         if not cfg:
             return {"error": "No printers configured"}, 400
         camera_config = _resolve_camera_settings(cfg, printer_index=printer_index)
-    return {"camera": camera_config}
+    return {"camera": _camera_settings_for_response(camera_config)}
 
 
 @app.post("/api/settings/camera")
@@ -3296,7 +3337,7 @@ def app_api_settings_camera_update():
         except ValueError as exc:
             return {"error": str(exc)}, 400
 
-    return {"status": "ok", "camera": camera_config}
+    return {"status": "ok", "camera": _camera_settings_for_response(camera_config)}
 
 
 @app.post("/api/settings/launcher-bat")
@@ -4240,6 +4281,109 @@ def app_api_camera_stream():
 
     response = Response(generate(), mimetype="multipart/x-mixed-replace; boundary=frame")
     response.headers["Cache-Control"] = "no-store"
+    return response
+
+
+@app.get("/api/camera/printer-stream")
+def app_api_camera_printer_stream():
+    """Return a Frigate-friendly printer camera stream remuxed to fragmented MP4."""
+    printer_index = _requested_printer_index()
+
+    if not app.config["login"] or app.config.get("unsupported_device"):
+        return {"error": "Printer camera is not available for this printer."}, 400
+
+    camera_settings = _resolve_camera_settings(printer_index=printer_index)
+    if not _printer_video_supported(printer_index=printer_index):
+        return {"error": "This printer does not expose a built-in camera."}, 400
+
+    integration = (camera_settings or {}).get("integration") or {}
+    if not integration.get("enabled"):
+        return {"error": "Printer integration stream is disabled in Setup -> Camera."}, 400
+
+    ffmpeg_path = _ffmpeg_path()
+    if not ffmpeg_path:
+        return {"error": "ffmpeg not installed"}, 500
+
+    vq = get_video_service(printer_index)
+    if not vq:
+        return {"error": "Printer video service unavailable."}, 503
+
+    try:
+        vq.integration_client_connected()
+        vq.await_ready()
+        proc = web.camera.open_printer_fmp4_stream(ffmpeg_path)
+    except ServiceStoppedError:
+        try:
+            vq.integration_client_disconnected()
+        except Exception:
+            pass
+        return {"error": "Printer video service is unavailable."}, 503
+    except web.camera.CameraCaptureError as exc:
+        try:
+            vq.integration_client_disconnected()
+        except Exception:
+            pass
+        return {"error": str(exc)}, 502
+
+    def generate():
+        stop_event = threading.Event()
+
+        def _pump_video():
+            try:
+                for msg in stream_videoqueue(printer_index, maxsize=VIDEO_STREAM_QUEUE_MAX):
+                    if stop_event.is_set():
+                        break
+                    payload = getattr(msg, "data", None)
+                    if not payload:
+                        continue
+                    stdin = getattr(proc, "stdin", None)
+                    if stdin is None:
+                        break
+                    try:
+                        stdin.write(payload)
+                        stdin.flush()
+                    except (BrokenPipeError, OSError, ValueError):
+                        break
+            finally:
+                stdin = getattr(proc, "stdin", None)
+                if stdin is not None:
+                    try:
+                        stdin.close()
+                    except Exception:
+                        pass
+
+        writer = threading.Thread(
+            target=_pump_video,
+            daemon=True,
+            name=f"printer-stream-pump-{printer_index}",
+        )
+        writer.start()
+
+        try:
+            for chunk in web.camera.iter_process_chunks(proc):
+                if chunk:
+                    yield chunk
+        finally:
+            stop_event.set()
+            stdin = getattr(proc, "stdin", None)
+            if stdin is not None:
+                try:
+                    stdin.close()
+                except Exception:
+                    pass
+            web.camera.stop_subprocess(proc)
+            try:
+                writer.join(timeout=1.0)
+            except RuntimeError:
+                pass
+            try:
+                vq.integration_client_disconnected()
+            except Exception as exc:
+                log.debug("Printer integration stream cleanup failed: %s", exc)
+
+    response = Response(generate(), mimetype="video/mp4")
+    response.headers["Cache-Control"] = "no-store"
+    response.headers["X-Accel-Buffering"] = "no"
     return response
 
 
@@ -5430,6 +5574,7 @@ _PROTECTED_GET_PATHS = {
     "/api/debug/services",
     "/api/camera/frame",
     "/api/camera/stream",
+    "/api/camera/printer-stream",
     "/api/snapshot",
     # Sensitive credential exposure: HA MQTT password, Apprise URLs/keys
     "/api/settings/mqtt",

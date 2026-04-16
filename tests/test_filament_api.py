@@ -448,7 +448,7 @@ def test_filament_swap_routes_cover_legacy_start_confirm_and_cancel(tmp_path, mo
     assert confirmed.get_json()["pending"] is True
     assert cancelled.status_code == 200
     assert cancelled.get_json()["pending"] is False
-    assert home_calls == ["all"]
+    assert home_calls == ["z"]
     assert home_waits == [42.0]
     assert sent[0] == "M104 S180"
     assert sent[1] == "M104 S220"
@@ -540,7 +540,7 @@ def test_legacy_swap_sends_heat_before_homing_when_nozzle_is_cold(tmp_path, monk
     assert sent[0] == "M104 S180"
     assert sent[1] == "M104 S220"
     assert sent[2] == "M104 S220"
-    assert home_calls == ["all"]
+    assert home_calls == ["z"]
     assert home_waits == [70.0]
     assert sent[3] == "G91"
     assert sent[4] == "G1 Z50 F600"
@@ -576,6 +576,23 @@ def test_filament_swap_command_config_overrides_templates(tmp_path):
 
     assert nozzle_command == "M109 S220"
     assert lift_command == "G1 Z50 F1234"
+
+
+def test_filament_swap_command_config_migrates_legacy_native_home_all(tmp_path):
+    mqtt = SimpleNamespace(is_printing=False, nozzle_temp=25, send_gcode=lambda gcode: None)
+    old_values, old_svc, old_filaments, old_swap = _install_state(tmp_path, mqtt)
+    command_config = tmp_path / "filament_swap_commands.json"
+    command_config.write_text(
+        '{"commands":{"home_all":"native:home_all"}}',
+        encoding="utf-8",
+    )
+
+    try:
+        config = web_module._load_filament_swap_commands()
+    finally:
+        _restore_state(old_values, old_svc, old_filaments, old_swap)
+
+    assert config["commands"]["home_all"] == "native:home_z"
 
 
 def test_legacy_swap_cancel_is_allowed_while_stage_is_running(tmp_path, monkeypatch):

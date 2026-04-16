@@ -312,6 +312,121 @@ def test_video_download_requires_auth_and_streams_when_enabled():
     assert videoqueue.await_ready_calls == 1
 
 
+def test_printer_integration_stream_requires_auth_and_enable_flag(monkeypatch):
+    cfg = _base_config()
+    client = app.test_client()
+    old_values, old_svc = _install_app_state(
+        api_key=API_KEY,
+        login=True,
+        video_supported=True,
+        config=FakeConfigManager(cfg),
+        svc=FakeVideoServices(None, []),
+    )
+
+    monkeypatch.setattr("web._ffmpeg_path", lambda: "/usr/bin/ffmpeg")
+
+    try:
+        unauthorized = client.get("/api/camera/printer-stream")
+        authorized = client.get("/api/camera/printer-stream", headers={"X-Api-Key": API_KEY})
+    finally:
+        _restore_app_state(old_values, old_svc)
+
+    assert unauthorized.status_code == 401
+    assert authorized.status_code == 400
+    assert authorized.get_json()["error"] == "Printer integration stream is disabled in Setup -> Camera."
+
+
+def test_printer_integration_stream_remuxes_when_enabled(monkeypatch):
+    class FakeProc:
+        class _In:
+            def write(self, _payload):
+                return None
+
+            def flush(self):
+                return None
+
+            def close(self):
+                return None
+
+        stdin = _In()
+        stdout = None
+
+        def poll(self):
+            return None
+
+    class FakeVideoQueue:
+        def __init__(self):
+            self.state = RunState.Stopped
+            self.wanted = False
+            self.start_calls = 0
+            self.await_ready_calls = 0
+            self.integration_connects = 0
+            self.integration_disconnects = 0
+
+        def start(self):
+            self.start_calls += 1
+            self.state = RunState.Running
+            self.wanted = True
+
+        def await_ready(self):
+            self.await_ready_calls += 1
+
+        def integration_client_connected(self):
+            self.integration_connects += 1
+            self.start()
+            return self.integration_connects
+
+        def integration_client_disconnected(self):
+            self.integration_disconnects += 1
+            self.wanted = False
+            self.state = RunState.Stopped
+            return self.integration_disconnects
+
+    cfg = _base_config()
+    cfg.camera = {
+        "per_printer": {
+            "SN1": {
+                "source": "printer",
+                "external": {
+                    "name": "",
+                    "stream_url": "",
+                    "snapshot_url": "",
+                    "refresh_sec": 3,
+                },
+                "integration": {
+                    "enabled": True,
+                },
+            }
+        }
+    }
+    videoqueue = FakeVideoQueue()
+    client = app.test_client()
+    old_values, old_svc = _install_app_state(
+        api_key=API_KEY,
+        login=True,
+        video_supported=True,
+        config=FakeConfigManager(cfg),
+        svc=FakeVideoServices(videoqueue, [b"raw-frame-1", b"raw-frame-2"]),
+    )
+
+    monkeypatch.setattr("web._ffmpeg_path", lambda: "/usr/bin/ffmpeg")
+    monkeypatch.setattr("web.camera.open_printer_fmp4_stream", lambda *_args, **_kwargs: FakeProc())
+    monkeypatch.setattr("web.camera.iter_process_chunks", lambda *_args, **_kwargs: iter([b"fmp4a", b"fmp4b"]))
+    monkeypatch.setattr("web.camera.stop_subprocess", lambda _proc: None)
+
+    try:
+        authorized = client.get("/api/camera/printer-stream", headers={"X-Api-Key": API_KEY})
+    finally:
+        _restore_app_state(old_values, old_svc)
+
+    assert authorized.status_code == 200
+    assert authorized.data == b"fmp4afmp4b"
+    assert videoqueue.start_calls == 1
+    assert videoqueue.await_ready_calls == 1
+    assert videoqueue.integration_connects == 1
+    assert videoqueue.integration_disconnects == 1
+
+
 def test_webserver_bootstraps_secret_key_and_skips_services_for_unsupported_device(tmp_path, monkeypatch):
     run_calls = []
     register_calls = []

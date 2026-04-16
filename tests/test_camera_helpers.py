@@ -3,9 +3,12 @@ import threading
 
 from web.camera import (
     CameraCaptureError,
+    build_printer_integration_stream_url,
     capture_camera_snapshot_to_file,
+    iter_process_chunks,
     iter_mjpeg_frames,
     open_external_mjpeg_stream,
+    open_printer_fmp4_stream,
 )
 
 
@@ -102,6 +105,41 @@ def test_open_external_mjpeg_stream_supports_ffmpeg_readable_non_rtsp_stream(mon
     assert cmd[-7:] == ["-f", "image2pipe", "-vcodec", "mjpeg", "-q:v", "5", "pipe:1"]
 
 
+def test_open_printer_fmp4_stream_uses_fragmented_mp4_remux_command(monkeypatch):
+    captured = {}
+
+    class FakePopen:
+        def __init__(self, cmd, **kwargs):
+            captured["cmd"] = cmd
+            captured["kwargs"] = kwargs
+            self.stdin = None
+            self.stdout = None
+
+    monkeypatch.setattr("subprocess.Popen", FakePopen)
+
+    proc = open_printer_fmp4_stream("ffmpeg", input_fps=15)
+
+    cmd = captured["cmd"]
+    assert proc.stdin is None
+    assert proc.stdout is None
+    assert cmd[:7] == ["ffmpeg", "-loglevel", "error", "-nostdin", "-fflags", "+genpts", "-r"]
+    assert "15" in cmd
+    assert cmd[cmd.index("-f"):cmd.index("-i") + 2] == ["-f", "h264", "-i", "pipe:0"]
+    assert "-movflags" in cmd
+    assert "+frag_keyframe+empty_moov+default_base_moof" in cmd
+    assert cmd[-5:] == ["-frag_duration", "1000000", "-f", "mp4", "pipe:1"]
+
+
+def test_build_printer_integration_stream_url_includes_printer_and_api_key():
+    url = build_printer_integration_stream_url(
+        "http://127.0.0.1:4470",
+        "secret key",
+        printer_index=1,
+    )
+
+    assert url == "http://127.0.0.1:4470/api/camera/printer-stream?printer_index=1&apikey=secret%20key"
+
+
 def test_iter_mjpeg_frames_extracts_jpegs_from_chunked_stream():
     class FakeStdout:
         def __init__(self):
@@ -145,3 +183,20 @@ def test_iter_mjpeg_frames_stops_when_ffmpeg_stdout_stalls():
         assert read_started.wait(timeout=0.5)
     finally:
         release_read.set()
+
+
+def test_iter_process_chunks_yields_binary_output():
+    class FakeStdout:
+        def __init__(self):
+            self.chunks = [b"one", b"two", b""]
+
+        def read(self, _size):
+            return self.chunks.pop(0)
+
+    class FakeProc:
+        stdout = FakeStdout()
+
+        def poll(self):
+            return None
+
+    assert list(iter_process_chunks(FakeProc(), chunk_size=4, stale_timeout=0.1)) == [b"one", b"two"]

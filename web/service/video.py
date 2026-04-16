@@ -65,9 +65,11 @@ class VideoQueue(Service):
         self.video_enabled = False
         self.timelapse_enabled = False
         self.light_control_enabled = False
+        self.integration_enabled = False
         self.last_frame_at = None
         self._enable_generation = 0  # increments each time video is enabled
         self._viewer_count = 0
+        self._integration_client_count = 0
         self._lock = threading.Lock()
         self._pppp_ref_held = False
         self._recycle_pppp_on_restart = False
@@ -98,6 +100,7 @@ class VideoQueue(Service):
             getattr(self, "video_enabled", False)
             or getattr(self, "timelapse_enabled", False)
             or getattr(self, "light_control_enabled", False)
+            or getattr(self, "integration_enabled", False)
         )
 
     def _sync_persistent_state(self):
@@ -120,7 +123,9 @@ class VideoQueue(Service):
             f"video_enabled={bool(getattr(self, 'video_enabled', False))}, "
             f"timelapse_enabled={bool(getattr(self, 'timelapse_enabled', False))}, "
             f"light_control_enabled={bool(getattr(self, 'light_control_enabled', False))}, "
+            f"integration_enabled={bool(getattr(self, 'integration_enabled', False))}, "
             f"viewers={int(getattr(self, '_viewer_count', 0))}, "
+            f"integration_clients={int(getattr(self, '_integration_client_count', 0))}, "
             f"wanted={bool(getattr(self, 'wanted', False))}, "
             f"live_active={bool(getattr(self, '_live_active', False))}, "
             f"api_id={'set' if getattr(self, 'api_id', None) is not None else 'none'}, "
@@ -724,6 +729,30 @@ class VideoQueue(Service):
             self._viewer_count += 1
             viewer_count = self._viewer_count
         return viewer_count
+
+    def integration_client_connected(self):
+        with self._lock:
+            self._integration_client_count += 1
+            self.integration_enabled = True
+            integration_count = self._integration_client_count
+        self._sync_persistent_state()
+        if self.state == RunState.Stopped or not self.wanted:
+            self.start()
+        return integration_count
+
+    def integration_client_disconnected(self):
+        with self._lock:
+            if self._integration_client_count > 0:
+                self._integration_client_count -= 1
+            else:
+                self._integration_client_count = 0
+            integration_count = self._integration_client_count
+            if integration_count == 0:
+                self.integration_enabled = False
+        self._sync_persistent_state()
+        if integration_count == 0 and not self._video_requested() and self.state == RunState.Running:
+            self.stop()
+        return integration_count
 
     def viewer_disconnected(self):
         stop_requested = False

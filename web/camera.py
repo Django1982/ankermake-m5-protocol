@@ -17,12 +17,18 @@ def _scrub_url_credentials(text):
 CAMERA_SOURCE_PRINTER = "printer"
 CAMERA_SOURCE_EXTERNAL = "external"
 DEFAULT_EXTERNAL_REFRESH_SEC = 3
+DEFAULT_PRINTER_INTEGRATION_ENABLED = False
+PRINTER_INTEGRATION_STREAM_PATH = "/api/camera/printer-stream"
+PRINTER_STREAM_INPUT_FPS = 15
 PRINTERS_WITHOUT_CAMERA = {"V8110"}
 RTSP_LOW_LATENCY_INPUT_ARGS = ["-fflags", "nobuffer", "-probesize", "32768", "-analyzeduration", "0"]
 _ALLOWED_CAMERA_URL_SCHEMES = {"http", "https", "rtsp", "rtmp"}
 _MJPEG_STALE_READ_TIMEOUT_SEC = 10.0
 _MJPEG_READER_QUEUE_SIZE = 4
 _MJPEG_READ_DONE = object()
+_PROCESS_STREAM_STALE_READ_TIMEOUT_SEC = 15.0
+_PROCESS_STREAM_READER_QUEUE_SIZE = 8
+_PROCESS_STREAM_READ_DONE = object()
 
 
 class CameraCaptureError(RuntimeError):
@@ -49,6 +55,9 @@ def default_camera_settings():
             "stream_url": "",
             "snapshot_url": "",
             "refresh_sec": DEFAULT_EXTERNAL_REFRESH_SEC,
+        },
+        "integration": {
+            "enabled": DEFAULT_PRINTER_INTEGRATION_ENABLED,
         },
     }
 
@@ -86,6 +95,13 @@ def normalize_external_camera_settings(data):
     }
 
 
+def normalize_printer_integration_settings(data):
+    merged = cli.model.merge_dict_defaults(data, default_camera_settings()["integration"])
+    return {
+        "enabled": bool(merged.get("enabled")),
+    }
+
+
 def _printer_from_config(cfg, printer_index):
     printers = getattr(cfg, "printers", None) or []
     if printer_index < 0 or printer_index >= len(printers):
@@ -111,6 +127,7 @@ def resolve_camera_settings(cfg, printer_index=0, source_override=None):
     if source_override is not None:
         source = _normalize_source(source_override, default=configured_source)
     external = normalize_external_camera_settings(entry.get("external"))
+    integration = normalize_printer_integration_settings(entry.get("integration"))
     external_configured = bool(external["stream_url"] or external["snapshot_url"])
 
     effective_source = None
@@ -146,6 +163,7 @@ def resolve_camera_settings(cfg, printer_index=0, source_override=None):
             **external,
             "configured": external_configured,
         },
+        "integration": integration,
     }
 
 
@@ -160,10 +178,17 @@ def update_camera_settings(cfg, printer_index, payload):
     current = resolve_camera_settings(cfg, printer_index)
     source = _normalize_source(payload.get("source", current.get("source")))
     external_payload = payload.get("external")
+    integration_payload = payload.get("integration")
     merged_external = normalize_external_camera_settings(
         cli.model.merge_dict_defaults(
             external_payload if isinstance(external_payload, dict) else {},
             current.get("external"),
+        )
+    )
+    merged_integration = normalize_printer_integration_settings(
+        cli.model.merge_dict_defaults(
+            integration_payload if isinstance(integration_payload, dict) else {},
+            current.get("integration"),
         )
     )
     _validate_camera_url(merged_external.get("stream_url"), "stream_url")
@@ -176,6 +201,7 @@ def update_camera_settings(cfg, printer_index, payload):
     per_printer[printer.sn] = {
         "source": source,
         "external": merged_external,
+        "integration": merged_integration,
     }
     root["per_printer"] = per_printer
     cfg.camera = root
@@ -195,6 +221,7 @@ def runtime_camera_state(camera_settings):
         "external_configured": bool(external.get("configured")),
         "external_refresh_sec": external.get("refresh_sec") or DEFAULT_EXTERNAL_REFRESH_SEC,
         "external_stream_preview": bool(stream_url),
+        "integration_enabled": bool((camera_settings.get("integration") or {}).get("enabled")),
     }
 
 
@@ -210,6 +237,19 @@ def build_printer_video_url(host, port, api_key=None, *, for_timelapse=False, pr
     query = []
     if for_timelapse:
         query.append("for_timelapse=1")
+    if printer_index is not None:
+        query.append(f"printer_index={int(printer_index)}")
+    if api_key:
+        query.append(f"apikey={quote(api_key, safe='')}")
+    if query:
+        url = f"{url}?{'&'.join(query)}"
+    return url
+
+
+def build_printer_integration_stream_url(base_url, api_key=None, *, printer_index=None):
+    base = str(base_url or "").rstrip("/")
+    url = f"{base}{PRINTER_INTEGRATION_STREAM_PATH}" if base else PRINTER_INTEGRATION_STREAM_PATH
+    query = []
     if printer_index is not None:
         query.append(f"printer_index={int(printer_index)}")
     if api_key:
@@ -318,6 +358,48 @@ def open_external_mjpeg_stream(ffmpeg_path, input_url, *, scale=None):
         raise CameraCaptureError(f"External camera stream could not start ffmpeg: {exc}") from exc
 
 
+def open_printer_fmp4_stream(ffmpeg_path, *, input_fps=PRINTER_STREAM_INPUT_FPS):
+    try:
+        fps = max(1, int(float(input_fps)))
+    except (TypeError, ValueError):
+        fps = PRINTER_STREAM_INPUT_FPS
+
+    cmd = [
+        ffmpeg_path,
+        "-loglevel",
+        "error",
+        "-nostdin",
+        "-fflags",
+        "+genpts",
+        "-r",
+        str(fps),
+        "-f",
+        "h264",
+        "-i",
+        "pipe:0",
+        "-an",
+        "-c:v",
+        "copy",
+        "-movflags",
+        "+frag_keyframe+empty_moov+default_base_moof",
+        "-frag_duration",
+        "1000000",
+        "-f",
+        "mp4",
+        "pipe:1",
+    ]
+
+    try:
+        return subprocess.Popen(
+            cmd,
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+        )
+    except OSError as exc:
+        raise CameraCaptureError(f"Printer integration stream could not start ffmpeg: {exc}") from exc
+
+
 def iter_mjpeg_frames(proc, *, chunk_size=8192, max_buffer=4 * 1024 * 1024, stale_timeout=_MJPEG_STALE_READ_TIMEOUT_SEC):
     stdout = getattr(proc, "stdout", None)
     if stdout is None:
@@ -385,6 +467,63 @@ def iter_mjpeg_frames(proc, *, chunk_size=8192, max_buffer=4 * 1024 * 1024, stal
             yield frame
 
 
+def iter_process_chunks(
+    proc,
+    *,
+    stream_attr="stdout",
+    chunk_size=65536,
+    stale_timeout=_PROCESS_STREAM_STALE_READ_TIMEOUT_SEC,
+):
+    stream = getattr(proc, stream_attr, None)
+    if stream is None:
+        return
+
+    chunks = queue.Queue(maxsize=_PROCESS_STREAM_READER_QUEUE_SIZE)
+
+    def _reader():
+        try:
+            while True:
+                chunk = stream.read(chunk_size)
+                while True:
+                    try:
+                        chunks.put(chunk, timeout=0.5)
+                        break
+                    except queue.Full:
+                        if getattr(proc, "poll", lambda: None)() is not None:
+                            return
+                if not chunk:
+                    break
+        except Exception as exc:
+            try:
+                chunks.put(exc, timeout=0.5)
+            except queue.Full:
+                pass
+        finally:
+            try:
+                chunks.put(_PROCESS_STREAM_READ_DONE, timeout=0.5)
+            except queue.Full:
+                pass
+
+    threading.Thread(target=_reader, daemon=True, name=f"{stream_attr}-reader").start()
+
+    while True:
+        try:
+            read_timeout = max(0.001, float(stale_timeout))
+        except (TypeError, ValueError):
+            read_timeout = _PROCESS_STREAM_STALE_READ_TIMEOUT_SEC
+        try:
+            chunk = chunks.get(timeout=read_timeout)
+        except queue.Empty:
+            break
+        if chunk is _PROCESS_STREAM_READ_DONE:
+            break
+        if isinstance(chunk, Exception):
+            break
+        if not chunk:
+            break
+        yield chunk
+
+
 def stop_external_mjpeg_stream(proc):
     if not proc:
         return
@@ -397,6 +536,10 @@ def stop_external_mjpeg_stream(proc):
                 proc.kill()
     except OSError:
         pass
+
+
+def stop_subprocess(proc):
+    stop_external_mjpeg_stream(proc)
 
 
 def capture_camera_snapshot_to_file(

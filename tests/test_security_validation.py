@@ -391,6 +391,7 @@ class TestSecurityIntegration:
             ("get", "/api/ankerctl/server/reload", None),
             ("get", "/api/camera/frame", None),
             ("get", "/api/camera/stream", None),
+            ("get", "/api/camera/printer-stream", None),
             ("get", "/api/snapshot", None),
         ]
 

@@ -222,6 +222,9 @@ def test_camera_settings_endpoints_persist_per_printer():
             json={
                 "camera": {
                     "source": "external",
+                    "integration": {
+                        "enabled": True,
+                    },
                     "external": {
                         "name": "Workbench Cam",
                         "snapshot_url": "http://cam.local/snapshot.jpg",
@@ -236,13 +239,16 @@ def test_camera_settings_endpoints_persist_per_printer():
 
     assert got.status_code == 200
     assert got.get_json()["camera"]["source"] == "printer"
+    assert got.get_json()["camera"]["integration"]["enabled"] is False
     assert updated.status_code == 200
     camera = updated.get_json()["camera"]
     assert camera["source"] == "external"
     assert camera["effective_source"] == "external"
+    assert camera["integration"]["enabled"] is True
     assert camera["external"]["name"] == "Workbench Cam"
     assert camera["external"]["snapshot_url"] == "http://cam.local/snapshot.jpg"
     assert cfg.camera["per_printer"]["SN1"]["source"] == "external"
+    assert cfg.camera["per_printer"]["SN1"]["integration"]["enabled"] is True
     assert "SN2" not in cfg.camera["per_printer"]
 
 
@@ -258,6 +264,9 @@ def test_camera_settings_endpoints_honor_requested_printer_index():
             json={
                 "camera": {
                     "source": "external",
+                    "integration": {
+                        "enabled": True,
+                    },
                     "external": {
                         "name": "Thing 2 Cam",
                         "snapshot_url": "http://thing2.local/snapshot.jpg",
@@ -282,10 +291,13 @@ def test_camera_settings_endpoints_honor_requested_printer_index():
     assert first_printer.status_code == 200
     assert second_printer.status_code == 200
     assert first_printer.get_json()["camera"]["source"] == "printer"
+    assert first_printer.get_json()["camera"]["integration"]["enabled"] is False
     assert second_printer.get_json()["camera"]["source"] == "external"
+    assert second_printer.get_json()["camera"]["integration"]["enabled"] is True
     assert second_printer.get_json()["camera"]["external"]["name"] == "Thing 2 Cam"
     assert "SN1" not in cfg.camera["per_printer"]
     assert cfg.camera["per_printer"]["SN2"]["source"] == "external"
+    assert cfg.camera["per_printer"]["SN2"]["integration"]["enabled"] is True
 
 
 def test_timelapse_settings_endpoints_persist_per_printer():

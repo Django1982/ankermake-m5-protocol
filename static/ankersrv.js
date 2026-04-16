@@ -3235,6 +3235,27 @@ $(function () {
         $("#camera-external-name").val(camera && camera.external ? camera.external.name || "" : "");
         $("#camera-external-stream-url").val(camera && camera.external ? camera.external.stream_url || "" : "");
         $("#camera-external-snapshot-url").val(camera && camera.external ? camera.external.snapshot_url || "" : "");
+        $("#camera-integration-enabled").prop("checked", !!(camera && camera.integration && camera.integration.enabled));
+
+        const integration = camera && camera.integration ? camera.integration : {};
+        const endpointUrl = integration.endpoint_url_with_api_key || integration.endpoint_url || integration.endpoint_path || "";
+        $("#camera-integration-endpoint").val(endpointUrl);
+
+        const statusEl = $("#camera-integration-status");
+        if (statusEl.length) {
+            let statusText = integration.enabled
+                ? "Integration endpoint is enabled for this printer."
+                : "Integration endpoint is disabled for this printer.";
+            if (integration.stream_format) {
+                statusText += ` ${integration.stream_format}.`;
+            }
+            if (integration.ffmpeg_available === false) {
+                statusText += " Install ffmpeg to use this stream.";
+            } else if (endpointUrl) {
+                statusText += " Use the URL above in Frigate or another FFmpeg-based consumer.";
+            }
+            statusEl.text(statusText);
+        }
     }
 
     async function loadCameraSettings() {
@@ -3291,6 +3312,22 @@ $(function () {
             }, "External camera settings saved");
         } catch (err) {
             flash_message(`Failed to save camera settings: ${err.message || err}`, "danger");
+        } finally {
+            btn.prop("disabled", false);
+        }
+    });
+
+    $("#camera-integration-save").on("click", async function () {
+        const btn = $(this);
+        btn.prop("disabled", true);
+        try {
+            await saveCameraSettings({
+                integration: {
+                    enabled: !!$("#camera-integration-enabled").prop("checked"),
+                },
+            }, "Printer integration stream settings saved");
+        } catch (err) {
+            flash_message(`Failed to save printer integration stream settings: ${err.message || err}`, "danger");
         } finally {
             btn.prop("disabled", false);
         }

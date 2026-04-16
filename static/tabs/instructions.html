@@ -13,12 +13,13 @@
                             </li>
                             <li class="mb-2">
                                 Confirm your printer list in the <strong>AnkerMake M5 Config</strong> preview on the
-                                right side of the Account tab.
+                                right side of the Account tab. If more than one printer is detected, use the printer
+                                selector in the top navbar to switch between them.
                             </li>
                             <li class="mb-2">
                                 If needed, switch to each printer from the navbar and save that printer's
-                                <strong>External Camera</strong> and <strong>Timelapse</strong> settings. Then review
-                                notification settings if you use alerts.
+                                <strong>External Camera</strong>, <strong>Printer Integration Stream</strong>, and
+                                <strong>Timelapse</strong> settings. Then review notification settings if you use alerts.
                             </li>
                             <li class="mb-2">
                                 Connect your slicer with the OctoPrint-compatible upload settings below, then use
@@ -151,6 +152,67 @@
                                 Manual snapshots follow the selected camera source. Timelapse has its own source setting
                                 in <strong>Setup -&gt; Timelapse</strong>, so Home page viewing does not have to interrupt
                                 captures.
+                            </li>
+                        </ol>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <div class="row g-3 mb-3">
+            <div class="col-lg-6">
+                <div class="card h-100">
+                    <div class="card-header fs-4">{{ macro.bi_icon("printer") }} Printer Selection</div>
+                    <div class="card-body">
+                        <ol class="mb-0">
+                            <li class="mb-2">
+                                If you have more than one printer, use the printer dropdown in the top navbar to pick
+                                the printer you want to work with first.
+                            </li>
+                            <li class="mb-2">
+                                The dropdown shows the printer name plus the last five characters of the serial number
+                                so you can confirm you picked the right one.
+                            </li>
+                            <li class="mb-2">
+                                After switching, the page reloads onto that printer. The <strong>Home</strong>,
+                                <strong>G-code</strong>, <strong>History</strong>, <strong>Filaments</strong>,
+                                <strong>Timelapse</strong>, and <strong>Snapshots</strong> pages will then show that
+                                printer's data.
+                            </li>
+                            <li class="mb-2">
+                                Camera setup and timelapse setup are saved per printer. Configure each printer
+                                separately if Thing 1 and Thing 2 should use different camera feeds or timelapse
+                                behavior.
+                            </li>
+                            <li class="mb-0">
+                                If the selector is locked or disabled, an environment setting is forcing a fixed
+                                printer index for this ankerctl session.
+                            </li>
+                        </ol>
+                    </div>
+                </div>
+            </div>
+            <div class="col-lg-6">
+                <div class="card h-100">
+                    <div class="card-header fs-4">{{ macro.bi_icon("broadcast") }} Printer Integration Stream</div>
+                    <div class="card-body">
+                        <ol class="mb-0">
+                            <li class="mb-2">Switch to the printer you want to expose first.</li>
+                            <li class="mb-2">Open <strong>Setup -&gt; Camera</strong>.</li>
+                            <li class="mb-2">
+                                In <strong>Printer Integration Stream</strong>, enable the printer camera integration
+                                endpoint and click <strong>Save Integration Stream</strong>.
+                            </li>
+                            <li class="mb-2">
+                                Copy the generated endpoint URL and use it in Frigate or another FFmpeg-based consumer.
+                            </li>
+                            <li class="mb-2">
+                                This endpoint is separate from the Home page camera source, so changing the Home view
+                                between printer and external camera does not change the integration stream.
+                            </li>
+                            <li class="mb-0">
+                                It requires <code>ffmpeg</code> and a printer model with a built-in camera. If API key
+                                protection is enabled in ankerctl, use the protected endpoint URL shown on the page.
                             </li>
                         </ol>
                     </div>
