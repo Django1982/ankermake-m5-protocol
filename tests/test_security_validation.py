@@ -10,12 +10,47 @@ from unittest.mock import Mock, patch
 
 import pytest
 
+import web
 from cli.model import Account, Config, Printer
 from web import app
 from web.service.filament import FilamentStore
 
 
 API_KEY = "secret-key-123456"
+
+_PROTECTED_SECURITY_REQUESTS = [
+    ("post", "/api/printer/gcode", {"gcode": "G28"}),
+    ("post", "/api/printer/control", {"value": 1}),
+    ("get", "/api/filaments", None),
+    ("get", "/api/debug/state", None),
+    ("get", "/api/ankerctl/server/reload", None),
+    ("get", "/api/camera/frame", None),
+    ("get", "/api/camera/stream", None),
+    ("get", "/api/camera/printer-stream", None),
+    ("get", "/api/snapshot", None),
+    ("get", "/api/files/printer", None),
+    ("get", "/api/files/printer/thumbnail?path=/tmp/udisk/udisk1/file.gcode", None),
+    ("get", "/api/history/1/thumbnail", None),
+]
+
+_EXPECTED_PROTECTED_GET_PATHS = {
+    "/api/ankerctl/server/reload",
+    "/api/camera/frame",
+    "/api/camera/stream",
+    "/api/camera/printer-stream",
+    "/api/debug/state",
+    "/api/filaments",
+    "/api/history",
+    "/api/snapshot",
+}
+
+_EXPECTED_PROTECTED_GET_PREFIXES = {
+    "/api/debug/",
+    "/api/files/printer",
+    "/api/history/",
+    "/api/timelapse/",
+    "/api/timelapse-snapshot/",
+}
 
 
 def _pending_security_coverage(reason):
@@ -153,13 +188,42 @@ class TestSQLInjectionProtection:
 class TestPathTraversalProtection:
     """Test path traversal attack prevention"""
 
-    def test_log_viewer_path_traversal_blocked(self):
+    def test_log_viewer_path_traversal_blocked(self, tmp_path, monkeypatch):
         """GET /api/debug/logs/../../../etc/passwd is blocked"""
-        _pending_security_coverage("debug log file path traversal")
+        if not hasattr(web, "app_api_debug_logs_content"):
+            pytest.skip("Debug log content route is only registered in dev mode")
+        client = app.test_client()
+        old_values, old_svc, old_filaments = _install_security_state(tmp_path)
+        old_log_dir = getattr(web, "_log_dir", None)
+        log_dir = tmp_path / "logs"
+        log_dir.mkdir()
+        monkeypatch.setattr(web, "_log_dir", str(log_dir), raising=False)
+        try:
+            response = client.get(
+                "/api/debug/logs/..%5C..%5Cpasswd",
+                headers=_auth_headers(),
+            )
+        finally:
+            monkeypatch.setattr(web, "_log_dir", old_log_dir, raising=False)
+            _restore_security_state(old_values, old_svc, old_filaments)
 
-    def test_timelapse_filename_path_traversal(self):
+        assert response.status_code == 400
+        assert "Invalid filename" in response.get_json()["error"]
+
+    def test_timelapse_filename_path_traversal(self, tmp_path):
         """Timelapse download with ../ in filename is blocked"""
-        _pending_security_coverage("timelapse download path traversal")
+        client = app.test_client()
+        old_values, old_svc, old_filaments = _install_security_state(tmp_path)
+        try:
+            response = client.get(
+                "/api/timelapse-snapshot/..%5Cbad/frame_00000.jpg",
+                headers=_auth_headers(),
+            )
+        finally:
+            _restore_security_state(old_values, old_svc, old_filaments)
+
+        assert response.status_code == 400
+        assert "invalid filename" in response.get_json()["error"]
 
     def test_file_upload_path_sanitization(self):
         """File upload with path separators is sanitized"""
@@ -204,9 +268,28 @@ class TestInputValidation:
         finally:
             _restore_security_state(old_values, old_svc, old_filaments)
 
-    def test_invalid_upload_rate_rejected(self):
+    def test_invalid_upload_rate_rejected(self, tmp_path):
         """Upload rate outside valid range (5,10,25,50,100) is rejected"""
-        _pending_security_coverage("upload rate validation in settings/update routes")
+        client = app.test_client()
+        old_values, old_svc, old_filaments = _install_security_state(tmp_path)
+        try:
+            non_integer = client.post(
+                "/api/ankerctl/config/upload-rate",
+                data={"upload_rate_mbps": "fast"},
+                headers=_auth_headers(),
+            )
+            out_of_range = client.post(
+                "/api/ankerctl/config/upload-rate",
+                data={"upload_rate_mbps": "7"},
+                headers=_auth_headers(),
+            )
+        finally:
+            _restore_security_state(old_values, old_svc, old_filaments)
+
+        assert non_integer.status_code == 400
+        assert "must be an integer" in non_integer.get_json()["error"]
+        assert out_of_range.status_code == 400
+        assert "must be one of" in out_of_range.get_json()["error"]
 
     def test_negative_printer_index_rejected(self, tmp_path):
         """Negative printer index in POST /api/printers/active is rejected"""
@@ -363,6 +446,11 @@ class TestFileSystemSecurity:
 class TestSecurityIntegration:
     """Integration tests combining multiple attack vectors"""
 
+    def test_security_auth_manifest_includes_sensitive_dynamic_routes(self):
+        """The auth guard must keep sensitive exact paths and dynamic prefixes protected."""
+        assert _EXPECTED_PROTECTED_GET_PATHS <= set(web._PROTECTED_GET_PATHS)
+        assert _EXPECTED_PROTECTED_GET_PREFIXES <= set(web._PROTECTED_GET_PREFIXES)
+
     def test_full_attack_chain_blocked(self, tmp_path):
         """Combined SQL injection + XSS + path traversal is blocked"""
         client = app.test_client()
@@ -383,26 +471,11 @@ class TestSecurityIntegration:
 
     def test_anonymous_user_cannot_access_protected_endpoints(self, tmp_path):
         """All protected endpoints require authentication"""
-        protected_requests = [
-            ("post", "/api/printer/gcode", {"gcode": "G28"}),
-            ("post", "/api/printer/control", {"value": 1}),
-            ("get", "/api/filaments", None),
-            ("get", "/api/debug/state", None),
-            ("get", "/api/ankerctl/server/reload", None),
-            ("get", "/api/camera/frame", None),
-            ("get", "/api/camera/stream", None),
-            ("get", "/api/camera/printer-stream", None),
-            ("get", "/api/snapshot", None),
-            ("get", "/api/files/printer", None),
-            ("get", "/api/files/printer/thumbnail?path=/tmp/udisk/udisk1/file.gcode", None),
-            ("get", "/api/history/1/thumbnail", None),
-        ]
-
         client = app.test_client()
         old_values, old_svc, old_filaments = _install_security_state(tmp_path)
         try:
             responses = []
-            for method, path, payload in protected_requests:
+            for method, path, payload in _PROTECTED_SECURITY_REQUESTS:
                 request_method = getattr(client, method)
                 kwargs = {"json": payload} if payload is not None else {}
                 responses.append((path, request_method(path, **kwargs).status_code))
