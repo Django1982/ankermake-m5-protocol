@@ -3,6 +3,7 @@ from datetime import datetime
 from pathlib import Path
 import subprocess
 from types import SimpleNamespace
+import pytest
 
 from cli.model import Account, Config, Printer
 from web import app
@@ -708,6 +709,64 @@ def test_history_reprint_route_requires_archived_file(tmp_path):
 
     assert response.status_code == 404
     assert "No archived GCode" in response.get_json()["error"]
+
+
+def test_fetch_remote_image_rejects_untrusted_preview_host(monkeypatch):
+    import web
+
+    cfg = _base_config()
+    cfg.printers[0].api_hosts = ["make-app.ankermake.com"]
+    old_values, old_svc = _install_app_state(config=cfg)
+    opener_calls = []
+    monkeypatch.setattr("urllib.request.build_opener", lambda *args, **kwargs: opener_calls.append((args, kwargs)))
+
+    try:
+        with pytest.raises(ValueError, match="host is not allowed"):
+            web._fetch_remote_image("https://evil.example/preview.png")
+    finally:
+        _restore_app_state(old_values, old_svc)
+
+    assert opener_calls == []
+
+
+def test_fetch_remote_image_rejects_oversized_remote_payload(monkeypatch):
+    from email.message import Message
+    import web
+
+    cfg = _base_config()
+    cfg.printers[0].api_hosts = ["example.test"]
+    old_values, old_svc = _install_app_state(config=cfg)
+
+    class FakeRemote:
+        def __init__(self):
+            self.headers = Message()
+            self.headers["Content-Type"] = "image/png"
+            self.headers["Content-Length"] = "6"
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def read(self, _size=-1):
+            return b""
+
+        def geturl(self):
+            return "https://example.test/preview.png"
+
+    class FakeOpener:
+        def open(self, request_obj, timeout=10.0):
+            return FakeRemote()
+
+    monkeypatch.setattr("urllib.request.build_opener", lambda *args, **kwargs: FakeOpener())
+    monkeypatch.setattr("web._PREVIEW_IMAGE_MAX_BYTES", 5)
+
+    try:
+        with pytest.raises(RuntimeError, match="exceeded"):
+            web._fetch_remote_image("https://example.test/preview.png")
+    finally:
+        _restore_app_state(old_values, old_svc)
 
 
 def test_timelapse_routes_list_download_delete_and_reject_traversal(tmp_path):

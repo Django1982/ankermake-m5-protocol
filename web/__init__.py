@@ -3871,20 +3871,131 @@ def _validate_printer_storage_path(file_path, source=None):
     return normalized_path, inferred_source
 
 
-def _fetch_remote_image(preview_url, timeout=10.0):
-    from urllib.error import HTTPError, URLError
-    from urllib.request import Request, urlopen
+_PREVIEW_IMAGE_MAX_BYTES = 5 * 1024 * 1024
+_PREVIEW_IMAGE_READ_CHUNK_BYTES = 64 * 1024
+_PREVIEW_IMAGE_ALLOWED_HOST_SUFFIXES = (
+    "ankermake.com",
+    "eufymake.com",
+)
+
+
+def _allowed_preview_image_hosts():
+    allowed_hosts = set()
+    config_manager = app.config.get("config")
+    if not config_manager:
+        return allowed_hosts
+
+    try:
+        with config_manager.open() as cfg:
+            if not cfg:
+                return allowed_hosts
+            for printer in getattr(cfg, "printers", []) or []:
+                for host in getattr(printer, "api_hosts", []) or []:
+                    host = str(host or "").strip().lower().rstrip(".")
+                    if host:
+                        allowed_hosts.add(host)
+    except Exception as exc:
+        log.debug(f"Preview image allowlist unavailable: {exc}")
+
+    return allowed_hosts
+
+
+def _validate_preview_image_url(preview_url):
+    from urllib.parse import urlparse
 
     preview_url = str(preview_url or "").strip()
-    if not preview_url.startswith(("http://", "https://")):
+    if not preview_url:
         raise ValueError("Invalid preview URL")
 
-    request_obj = Request(preview_url, headers={"User-Agent": "ankerctl"})
+    parsed = urlparse(preview_url)
+    scheme = parsed.scheme.lower()
+    hostname = (parsed.hostname or "").strip().lower().rstrip(".")
+
+    if scheme != "https":
+        raise ValueError("Preview URL must use HTTPS")
+    if not hostname:
+        raise ValueError("Invalid preview URL")
+    if parsed.username or parsed.password:
+        raise ValueError("Preview URL credentials are not allowed")
+    if parsed.port not in (None, 443):
+        raise ValueError("Preview URL port is not allowed")
+
+    allowed_hosts = _allowed_preview_image_hosts()
+    if hostname in allowed_hosts:
+        return preview_url
+    if any(
+        hostname == suffix or hostname.endswith("." + suffix)
+        for suffix in _PREVIEW_IMAGE_ALLOWED_HOST_SUFFIXES
+    ):
+        return preview_url
+
+    raise ValueError("Preview URL host is not allowed")
+
+
+def _preview_image_content_type(headers):
+    raw_content_type = headers.get("Content-Type") if headers else None
+    if not raw_content_type:
+        return "image/jpeg"
+
+    content_type = raw_content_type.split(";", 1)[0].strip().lower()
+    if not content_type.startswith("image/"):
+        raise RuntimeError("Preview image response was not an image")
+    return content_type or "image/jpeg"
+
+
+def _read_bounded_remote_image(remote, *, max_bytes):
+    content_length = None
+    if getattr(remote, "headers", None):
+        content_length = remote.headers.get("Content-Length")
+    if content_length:
+        try:
+            if int(content_length) > max_bytes:
+                raise RuntimeError(
+                    f"Preview image exceeded the {max_bytes} byte limit"
+                )
+        except ValueError:
+            pass
+
+    chunks = []
+    total = 0
+    while True:
+        chunk = remote.read(min(_PREVIEW_IMAGE_READ_CHUNK_BYTES, max_bytes - total + 1))
+        if not chunk:
+            break
+        total += len(chunk)
+        if total > max_bytes:
+            raise RuntimeError(
+                f"Preview image exceeded the {max_bytes} byte limit"
+            )
+        chunks.append(chunk)
+
+    return b"".join(chunks)
+
+
+def _fetch_remote_image(preview_url, timeout=10.0):
+    from urllib.error import HTTPError, URLError
+    from urllib.request import HTTPRedirectHandler, Request, build_opener
+
+    class _PreviewImageRedirectHandler(HTTPRedirectHandler):
+        def redirect_request(self, req, fp, code, msg, headers, newurl):
+            _validate_preview_image_url(newurl)
+            return super().redirect_request(req, fp, code, msg, headers, newurl)
+
+    preview_url = _validate_preview_image_url(preview_url)
+    opener = build_opener(_PreviewImageRedirectHandler())
+    request_obj = Request(
+        preview_url,
+        headers={
+            "User-Agent": "ankerctl",
+            "Accept": "image/*",
+        },
+    )
     try:
-        with urlopen(request_obj, timeout=timeout) as remote:
-            data = remote.read()
-            content_type = remote.headers.get_content_type() if remote.headers else None
-            return data, (content_type or "image/jpeg")
+        with opener.open(request_obj, timeout=timeout) as remote:
+            _validate_preview_image_url(getattr(remote, "geturl", lambda: preview_url)())
+            data = _read_bounded_remote_image(remote, max_bytes=_PREVIEW_IMAGE_MAX_BYTES)
+            content_type = _preview_image_content_type(getattr(remote, "headers", None))
+            return data, content_type
     except HTTPError as exc:
         raise RuntimeError(f"Preview image request failed with HTTP {exc.code}") from exc
     except URLError as exc:
