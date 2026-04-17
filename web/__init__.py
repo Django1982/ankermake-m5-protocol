@@ -418,11 +418,7 @@ def _camera_settings_for_response(camera_config):
         base_url,
         printer_index=printer_index,
     )
-    integration["endpoint_url_with_api_key"] = web.camera.build_printer_integration_stream_url(
-        base_url,
-        api_key=app.config.get("api_key"),
-        printer_index=printer_index,
-    )
+    integration["api_key_required"] = bool(app.config.get("api_key"))
     integration["stream_format"] = "H.264 / fragmented MP4 (ffmpeg remux)"
     integration["ffmpeg_available"] = _ffmpeg_available()
     camera_payload["integration"] = integration

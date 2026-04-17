@@ -240,11 +240,17 @@ def test_camera_settings_endpoints_persist_per_printer():
     assert got.status_code == 200
     assert got.get_json()["camera"]["source"] == "printer"
     assert got.get_json()["camera"]["integration"]["enabled"] is False
+    assert "endpoint_url_with_api_key" not in got.get_json()["camera"]["integration"]
+    assert got.get_json()["camera"]["integration"]["api_key_required"] is True
+    assert "apikey=" not in got.get_json()["camera"]["integration"]["endpoint_url"]
     assert updated.status_code == 200
     camera = updated.get_json()["camera"]
     assert camera["source"] == "external"
     assert camera["effective_source"] == "external"
     assert camera["integration"]["enabled"] is True
+    assert "endpoint_url_with_api_key" not in camera["integration"]
+    assert camera["integration"]["api_key_required"] is True
+    assert "apikey=" not in camera["integration"]["endpoint_url"]
     assert camera["external"]["name"] == "Workbench Cam"
     assert camera["external"]["snapshot_url"] == "http://cam.local/snapshot.jpg"
     assert cfg.camera["per_printer"]["SN1"]["source"] == "external"
@@ -292,8 +298,13 @@ def test_camera_settings_endpoints_honor_requested_printer_index():
     assert second_printer.status_code == 200
     assert first_printer.get_json()["camera"]["source"] == "printer"
     assert first_printer.get_json()["camera"]["integration"]["enabled"] is False
+    assert "endpoint_url_with_api_key" not in first_printer.get_json()["camera"]["integration"]
+    assert first_printer.get_json()["camera"]["integration"]["api_key_required"] is True
     assert second_printer.get_json()["camera"]["source"] == "external"
     assert second_printer.get_json()["camera"]["integration"]["enabled"] is True
+    assert "endpoint_url_with_api_key" not in second_printer.get_json()["camera"]["integration"]
+    assert second_printer.get_json()["camera"]["integration"]["api_key_required"] is True
+    assert "apikey=" not in second_printer.get_json()["camera"]["integration"]["endpoint_url"]
     assert second_printer.get_json()["camera"]["external"]["name"] == "Thing 2 Cam"
     assert "SN1" not in cfg.camera["per_printer"]
     assert cfg.camera["per_printer"]["SN2"]["source"] == "external"

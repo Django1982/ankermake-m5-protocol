@@ -3238,7 +3238,7 @@ $(function () {
         $("#camera-integration-enabled").prop("checked", !!(camera && camera.integration && camera.integration.enabled));
 
         const integration = camera && camera.integration ? camera.integration : {};
-        const endpointUrl = integration.endpoint_url_with_api_key || integration.endpoint_url || integration.endpoint_path || "";
+        const endpointUrl = integration.endpoint_url || integration.endpoint_path || "";
         $("#camera-integration-endpoint").val(endpointUrl);
 
         const statusEl = $("#camera-integration-status");
@@ -3253,6 +3253,9 @@ $(function () {
                 statusText += " Install ffmpeg to use this stream.";
             } else if (endpointUrl) {
                 statusText += " Use the URL above in Frigate or another FFmpeg-based consumer.";
+            }
+            if (integration.api_key_required) {
+                statusText += " API-key auth is enabled, so add your API key in the consumer manually.";
             }
             statusEl.text(statusText);
         }
