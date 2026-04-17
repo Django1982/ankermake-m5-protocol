@@ -23,6 +23,7 @@ The `ankerctl` program uses [`libflagship`](documentation/developer-docs/libflag
 - Automatic timelapse capture during prints, including pause, resume, stop, partial-save-on-failure behavior, per-printer camera source selection (`follow`, printer, or external), and MP4 assembly at print end. Requires `ffmpeg`.
 - Dedicated **Snapshots** page for timelapse frames and manual snapshots, including preview, download, and delete actions.
 - Stream the built-in printer camera to your computer, with support for optional external camera feeds and a camera setup page.
+- Optional printer camera integration endpoint that remuxes the built-in camera feed to H.264 / fragmented MP4 with `ffmpeg` for Frigate and other FFmpeg-based consumers.
 - Manual snapshot capture from the Home page, with snapshots saved into the Snapshots gallery.
 - Live ankerctl console viewer on the Home page, with recent history and live updates.
 - Filament status indicators and filament-change awareness in printer status.
