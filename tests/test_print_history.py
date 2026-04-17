@@ -36,13 +36,19 @@ def test_record_start_does_not_interrupt_active_jobs_from_other_printers(tmp_pat
     first_id = history0.record_start("thing1-part.gcode", task_id="thing1-task")
     second_id = history1.record_start("thing2-part.gcode", task_id="thing2-task")
 
-    entries = history0.get_history(limit=10)
-    by_id = {entry["id"]: entry for entry in entries}
+    entries0 = history0.get_history(limit=10)
+    entries1 = history1.get_history(limit=10)
+    all_entries = PrintHistory(db_path=db_path).get_history(limit=10)
 
-    assert by_id[first_id]["status"] == "started"
-    assert by_id[first_id]["printer_index"] == 0
-    assert by_id[second_id]["status"] == "started"
-    assert by_id[second_id]["printer_index"] == 1
+    assert [entry["id"] for entry in entries0] == [first_id]
+    assert [entry["id"] for entry in entries1] == [second_id]
+    assert history0.get_count() == 1
+    assert history1.get_count() == 1
+    assert history0.get_entry(first_id)["printer_index"] == 0
+    assert history1.get_entry(second_id)["printer_index"] == 1
+    assert history0.get_entry(second_id) is None
+    assert history1.get_entry(first_id) is None
+    assert {entry["id"] for entry in all_entries} == {first_id, second_id}
 
 
 def test_printer_scoped_history_claims_legacy_active_task_row(tmp_path):
@@ -246,6 +252,44 @@ def test_history_clear_removes_archived_gcode_files(tmp_path):
     assert history.get_archive_path(row_id) is None
 
 
+def test_printer_scoped_clear_only_removes_current_printer_entries_and_archives(tmp_path):
+    db_path = tmp_path / "history.db"
+    history0 = PrintHistory(db_path=db_path, printer_index=0)
+    history1 = PrintHistory(db_path=db_path, printer_index=1)
+
+    archive0 = history0.archive_upload("thing1.gcode", b"G28\n")
+    archive1 = history1.archive_upload("thing2.gcode", b"G28\n")
+
+    row0_id = history0.record_start(
+        "thing1.gcode",
+        task_id="thing1-task",
+        archive_relpath=archive0["archive_relpath"],
+        archive_size=archive0["archive_size"],
+    )
+    history0.record_finish(task_id="thing1-task", progress=100)
+    row1_id = history1.record_start(
+        "thing2.gcode",
+        task_id="thing2-task",
+        archive_relpath=archive1["archive_relpath"],
+        archive_size=archive1["archive_size"],
+    )
+    history1.record_finish(task_id="thing2-task", progress=100)
+
+    archive0_path = history0.get_archive_path(row0_id)
+    archive1_path = history1.get_archive_path(row1_id)
+    assert archive0_path is not None and os.path.exists(archive0_path)
+    assert archive1_path is not None and os.path.exists(archive1_path)
+
+    history0.clear()
+
+    assert history0.get_count() == 0
+    assert history1.get_count() == 1
+    assert history0.get_entry(row0_id) is None
+    assert history1.get_entry(row1_id) is not None
+    assert not os.path.exists(archive0_path)
+    assert os.path.exists(archive1_path)
+
+
 def test_history_preview_url_marks_entry_thumbnail_available(tmp_path):
     history = PrintHistory(db_path=tmp_path / "history.db")
 
@@ -286,3 +330,42 @@ def test_delete_entries_removes_selected_rows_and_unreferenced_archives(tmp_path
     assert history.get_entry(second_id) is not None
     assert first_archive_path is not None and not os.path.exists(first_archive_path)
     assert second_archive_path is not None and os.path.exists(second_archive_path)
+
+
+def test_printer_scoped_delete_entries_only_removes_matching_printer_rows(tmp_path):
+    db_path = tmp_path / "history.db"
+    history0 = PrintHistory(db_path=db_path, printer_index=0)
+    history1 = PrintHistory(db_path=db_path, printer_index=1)
+
+    archive0 = history0.archive_upload("thing1.gcode", b"G28\n")
+    archive1 = history1.archive_upload("thing2.gcode", b"G28\n")
+
+    row0_id = history0.record_start(
+        "thing1.gcode",
+        task_id="thing1-task",
+        archive_relpath=archive0["archive_relpath"],
+        archive_size=archive0["archive_size"],
+    )
+    history0.record_finish(task_id="thing1-task", progress=100)
+    row1_id = history1.record_start(
+        "thing2.gcode",
+        task_id="thing2-task",
+        archive_relpath=archive1["archive_relpath"],
+        archive_size=archive1["archive_size"],
+    )
+    history1.record_finish(task_id="thing2-task", progress=100)
+
+    archive0_path = history0.get_archive_path(row0_id)
+    archive1_path = history1.get_archive_path(row1_id)
+    assert archive0_path is not None and os.path.exists(archive0_path)
+    assert archive1_path is not None and os.path.exists(archive1_path)
+
+    assert history0.delete_entries([row1_id]) == 0
+    assert history1.get_entry(row1_id) is not None
+    assert os.path.exists(archive1_path)
+
+    assert history0.delete_entries([row0_id]) == 1
+    assert history0.get_entry(row0_id) is None
+    assert history1.get_entry(row1_id) is not None
+    assert not os.path.exists(archive0_path)
+    assert os.path.exists(archive1_path)
