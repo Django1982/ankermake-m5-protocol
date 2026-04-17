@@ -5598,6 +5598,17 @@ _PROTECTED_GET_PATHS = {
     "/api/timelapse-snapshots",
 }
 
+# Dynamic GET route families that must also require auth. These cannot be
+# represented safely as exact-path matches because they contain per-item
+# segments such as history entry ids or storage thumbnail lookups.
+_PROTECTED_GET_PREFIXES = (
+    "/api/debug/",
+    "/api/timelapse/",
+    "/api/timelapse-snapshot/",
+    "/api/history/",
+    "/api/files/printer",
+)
+
 # POST endpoints needed for initial printer setup (config import / login)
 _SETUP_PATHS = {
     "/api/ankerctl/config/upload",
@@ -5706,14 +5717,16 @@ def _check_api_key():
     if header_key and secrets.compare_digest(header_key, api_key):
         return None
 
-    # Allow read-only (GET/HEAD/OPTIONS) unless the path is explicitly protected.
-    # Also protect any path under /api/debug/ (prefix match for dynamic segments).
-    is_debug_path = request.path.startswith("/api/debug/")
-    is_timelapse_path = (
-        request.path.startswith("/api/timelapse/")
-        or request.path.startswith("/api/timelapse-snapshot/")
+    # Allow read-only (GET/HEAD/OPTIONS) unless the path is explicitly protected
+    # or belongs to a protected dynamic route family.
+    is_protected_get_prefix = any(
+        request.path.startswith(prefix) for prefix in _PROTECTED_GET_PREFIXES
     )
-    if request.method in ("GET", "HEAD", "OPTIONS") and request.path not in _PROTECTED_GET_PATHS and not is_debug_path and not is_timelapse_path:
+    if (
+        request.method in ("GET", "HEAD", "OPTIONS")
+        and request.path not in _PROTECTED_GET_PATHS
+        and not is_protected_get_prefix
+    ):
         return None
 
     # Allow setup endpoints when no printer is configured yet

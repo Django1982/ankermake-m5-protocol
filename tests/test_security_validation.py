@@ -393,6 +393,9 @@ class TestSecurityIntegration:
             ("get", "/api/camera/stream", None),
             ("get", "/api/camera/printer-stream", None),
             ("get", "/api/snapshot", None),
+            ("get", "/api/files/printer", None),
+            ("get", "/api/files/printer/thumbnail?path=/tmp/udisk/udisk1/file.gcode", None),
+            ("get", "/api/history/1/thumbnail", None),
         ]
 
         client = app.test_client()
@@ -408,6 +411,47 @@ class TestSecurityIntegration:
 
         assert responses
         assert all(status == 401 for _, status in responses), responses
+
+    def test_anonymous_user_is_blocked_before_dynamic_history_and_storage_logic(self, tmp_path, monkeypatch):
+        """Sensitive dynamic GET routes must 401 before hitting printer/history logic."""
+        storage_probe_calls = []
+        mqtt_borrow_calls = []
+
+        def fake_probe(*args, **kwargs):
+            storage_probe_calls.append((args, kwargs))
+            return {"source_value": 1, "reply_count": 1, "files": []}, None
+
+        @contextmanager
+        def fake_borrow_mqtt(printer_index):
+            mqtt_borrow_calls.append(printer_index)
+            yield SimpleNamespace(
+                is_printing=False,
+                has_pending_print_start=False,
+                is_preparing_print=False,
+                get_cached_stored_file_preview_url=lambda *args, **kwargs: "https://example.test/thumb.png",
+                get_stored_file_preview_url=lambda *args, **kwargs: "https://example.test/thumb.png",
+                history=SimpleNamespace(
+                    get_entry=lambda entry_id: {"preview_url": "https://example.test/thumb.png"},
+                    get_thumbnail_path=lambda entry_id: None,
+                ),
+            )
+
+        client = app.test_client()
+        old_values, old_svc, old_filaments = _install_security_state(tmp_path)
+        monkeypatch.setattr("web._probe_printer_storage_files", fake_probe)
+        monkeypatch.setattr("web.borrow_mqtt", fake_borrow_mqtt)
+        try:
+            printer_files = client.get("/api/files/printer")
+            printer_thumbnail = client.get("/api/files/printer/thumbnail?path=/tmp/udisk/udisk1/file.gcode")
+            history_thumbnail = client.get("/api/history/1/thumbnail")
+        finally:
+            _restore_security_state(old_values, old_svc, old_filaments)
+
+        assert printer_files.status_code == 401
+        assert printer_thumbnail.status_code == 401
+        assert history_thumbnail.status_code == 401
+        assert storage_probe_calls == []
+        assert mqtt_borrow_calls == []
 
     def test_authenticated_user_can_access_allowed_endpoints(self, tmp_path):
         """Authenticated user can access non-restricted endpoints"""
