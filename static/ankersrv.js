@@ -1112,6 +1112,21 @@ $(function () {
         }
     }
 
+    function withHistoryScopeQuery(url) {
+        const base = withActivePrinterQuery(url);
+        if (!historyAllPrinters) return base;
+        try {
+            const resolved = new URL(base, window.location.origin);
+            resolved.searchParams.set("all_printers", "1");
+            if (resolved.origin === window.location.origin) {
+                return `${resolved.pathname}${resolved.search}${resolved.hash}`;
+            }
+            return resolved.toString();
+        } catch (_err) {
+            return `${base}${base.includes("?") ? "&" : "?"}all_printers=1`;
+        }
+    }
+
     function processPrinterAlertEntries(entries, notifyUser) {
         if (!Array.isArray(entries) || !entries.length) {
             return;
@@ -3964,6 +3979,7 @@ $(function () {
      * Print History Tab
      */
     let historyOffset = 0;
+    let historyAllPrinters = false;
     const HISTORY_LIMIT = 25;
     const selectedHistoryIds = new Set();
 
@@ -4008,7 +4024,7 @@ $(function () {
     }
 
     function loadHistory(append) {
-        fetch(withActivePrinterQuery(`/api/history?limit=${HISTORY_LIMIT}&offset=${historyOffset}`))
+        fetch(withHistoryScopeQuery(`/api/history?limit=${HISTORY_LIMIT}&offset=${historyOffset}`))
             .then(r => r.json())
             .then(data => {
                 const tbody = $("#history-tbody");
@@ -4017,26 +4033,38 @@ $(function () {
                     selectedHistoryIds.clear();
                 }
                 if (data.entries.length === 0 && !append) {
-                    tbody.html('<tr><td colspan="6" class="text-center text-muted py-4">No history yet</td></tr>');
+                    const emptyMsg = historyAllPrinters ? "No history yet across all printers" : "No history yet";
+                    tbody.html(`<tr><td colspan="6" class="text-center text-muted py-4">${emptyMsg}</td></tr>`);
                 }
                 data.entries.forEach(e => {
                     const started = e.started_at ? new Date(e.started_at + "Z").toLocaleString() : "-";
                     const safeFilename = escapeHtml(e.filename);
+                    const safePrinterName = escapeHtml(e.printer_name || "Unknown");
                     const thumbnail = buildGCodeThumbnail(e.thumbnail_url, e.filename || "History thumbnail");
                     const canDelete = e.status !== "started";
                     const isChecked = selectedHistoryIds.has(e.id);
                     const checkboxCell = canDelete
                         ? `<input type="checkbox" class="form-check-input history-select-checkbox" data-history-id="${e.id}" ${isChecked ? "checked" : ""} aria-label="Select ${safeFilename}">`
                         : '<input type="checkbox" class="form-check-input" disabled aria-label="Cannot delete in-progress history entry">';
+                    const printerAttr = (e.printer_index !== null && e.printer_index !== undefined)
+                        ? ` data-history-printer-index="${e.printer_index}"`
+                        : "";
                     const actionCell = e.can_reprint
-                        ? `<button class="btn btn-sm btn-outline-primary history-reprint-btn" data-history-id="${e.id}" data-history-name="${safeFilename}">Reprint</button>`
+                        ? `<button class="btn btn-sm btn-outline-primary history-reprint-btn" data-history-id="${e.id}" data-history-name="${safeFilename}"${printerAttr}>Reprint</button>`
                         : '<span class="text-muted small">-</span>';
+                    // Show printer attribution below the filename when viewing all printers
+                    const printerMeta = historyAllPrinters
+                        ? `<div class="text-muted small">${safePrinterName}</div>`
+                        : "";
                     const row = `<tr>
                         <td class="text-center align-middle">${checkboxCell}</td>
                         <td class="history-file-cell" title="${safeFilename}">
                             <div class="d-flex align-items-center gap-2">
                                 ${thumbnail}
-                                <div class="text-truncate" style="max-width:200px;">${safeFilename}</div>
+                                <div>
+                                    <div class="text-truncate" style="max-width:200px;">${safeFilename}</div>
+                                    ${printerMeta}
+                                </div>
                             </div>
                         </td>
                         <td>${statusBadge(e.status)}</td>
@@ -4046,7 +4074,8 @@ $(function () {
                     </tr>`;
                     tbody.append(row);
                 });
-                $("#history-count").text(`${Math.min(historyOffset + data.entries.length, data.total)} / ${data.total} entries`);
+                const countSuffix = historyAllPrinters ? " across all printers" : "";
+                $("#history-count").text(`${Math.min(historyOffset + data.entries.length, data.total)} / ${data.total} entries${countSuffix}`);
                 if (historyOffset + data.entries.length < data.total) {
                     $("#history-load-more").show();
                 } else {
@@ -4071,6 +4100,21 @@ $(function () {
     $("#history-load-more").on("click", function () {
         historyOffset += HISTORY_LIMIT;
         loadHistory(true);
+    });
+
+    $("#history-all-printers").on("change", function () {
+        historyAllPrinters = !!$(this).prop("checked");
+        // Update Clear button label to reflect the current scope
+        const clearBtn = $("#history-clear");
+        if (historyAllPrinters) {
+            clearBtn.html('<i class="bi bi-trash"></i> Clear All Printers').attr("title", "Clear history across all printers");
+        } else {
+            clearBtn.html('<i class="bi bi-trash"></i> Clear').removeAttr("title");
+        }
+        historyOffset = 0;
+        selectedHistoryIds.clear();
+        $("#history-tbody").empty();
+        loadHistory(false);
     });
 
     $(document).on("change", ".history-select-checkbox", function () {
@@ -4138,8 +4182,11 @@ $(function () {
     });
 
     $("#history-clear").on("click", function () {
-        if (!confirm("Clear all print history?")) return;
-        fetch(withActivePrinterQuery("/api/history"), { method: "DELETE" })
+        const confirmMsg = historyAllPrinters
+            ? "Clear history across all printers?"
+            : "Clear all print history?";
+        if (!confirm(confirmMsg)) return;
+        fetch(withHistoryScopeQuery("/api/history"), { method: "DELETE" })
             .then(() => {
                 selectedHistoryIds.clear();
                 historyOffset = 0;
@@ -4152,6 +4199,7 @@ $(function () {
         const btn = $(this);
         const entryId = btn.attr("data-history-id");
         const entryName = btn.attr("data-history-name") || "selected file";
+        const entryPrinterIndexAttr = btn.attr("data-history-printer-index");
         if (!entryId) {
             return;
         }
@@ -4160,9 +4208,19 @@ $(function () {
         }
         btn.prop("disabled", true);
         try {
-            const resp = await fetch(withActivePrinterQuery(`/api/history/${encodeURIComponent(entryId)}/reprint`), {
-                method: "POST",
-            });
+            // When viewing all-printers history, route the reprint to the printer that
+            // originally ran the job (from data-history-printer-index), not the active one.
+            let reprintUrl;
+            if (historyAllPrinters && entryPrinterIndexAttr !== undefined && entryPrinterIndexAttr !== "") {
+                const pi = parseInt(entryPrinterIndexAttr, 10);
+                const base = `/api/history/${encodeURIComponent(entryId)}/reprint`;
+                reprintUrl = Number.isFinite(pi)
+                    ? `${base}?printer_index=${encodeURIComponent(pi)}`
+                    : withActivePrinterQuery(base);
+            } else {
+                reprintUrl = withActivePrinterQuery(`/api/history/${encodeURIComponent(entryId)}/reprint`);
+            }
+            const resp = await fetch(reprintUrl, { method: "POST" });
             const data = await resp.json().catch(() => ({}));
             if (!resp.ok) {
                 throw new Error(data.error || `HTTP ${resp.status}`);

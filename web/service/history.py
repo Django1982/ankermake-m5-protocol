@@ -680,6 +680,38 @@ class PrintHistory:
                     log.info("History: deleted %d selected entr%s", deleted, "y" if deleted == 1 else "ies")
                 return deleted
 
+    def get_history_for_printer(self, printer_index, limit=50, offset=0):
+        """Return history filtered to a specific printer_index (NULL entries included)."""
+        with self._lock:
+            with self._connect() as conn:
+                rows = conn.execute(
+                    "SELECT * FROM print_history "
+                    "WHERE printer_index=? OR printer_index IS NULL "
+                    "ORDER BY id DESC LIMIT ? OFFSET ?",
+                    (printer_index, limit, offset),
+                ).fetchall()
+                return [self._decorate_entry(r, conn=conn) for r in rows]
+
+    def get_count_for_printer(self, printer_index):
+        """Return count for a specific printer_index (NULL entries included)."""
+        with self._lock:
+            with self._connect() as conn:
+                return conn.execute(
+                    "SELECT COUNT(*) FROM print_history WHERE printer_index=? OR printer_index IS NULL",
+                    (printer_index,),
+                ).fetchone()[0]
+
+    def clear_for_printer(self, printer_index):
+        """Delete only entries belonging to printer_index (not NULL entries)."""
+        with self._lock:
+            with self._connect() as conn:
+                conn.execute(
+                    "DELETE FROM print_history WHERE printer_index=?",
+                    (printer_index,),
+                )
+                conn.commit()
+                log.info("Print history cleared for printer %d", printer_index)
+
     def clear(self):
         """Delete all history entries."""
         with self._lock:

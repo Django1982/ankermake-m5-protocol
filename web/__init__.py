@@ -3992,25 +3992,59 @@ def app_api_snapshot():
         download_name=f"ankerctl_snapshot_{timestamp}.jpg",
     )
 
+def _configured_printer_name_map():
+    """Return {printer_index: name_str} for all configured printers."""
+    config = app.config.get("config")
+    if not config:
+        return {}
+    try:
+        with config.open() as cfg:
+            if not cfg:
+                return {}
+            printers = getattr(cfg, "printers", None) or []
+            return {
+                i: getattr(p, "name", None) or f"Printer {i + 1}"
+                for i, p in enumerate(printers)
+            }
+    except Exception:
+        return {}
+
+
 @app.get("/api/history")
 def app_api_history():
-    """Return print history as JSON with pagination."""
+    """Return print history as JSON with pagination.
+
+    Query params:
+      all_printers=1  — return entries for all printers (no printer filter)
+      limit           — max entries to return (default 50, max 500)
+      offset          — pagination offset (default 0)
+    """
     printer_index = _requested_printer_index()
-    limit = request.args.get("limit", 50, type=int)
-    offset = request.args.get("offset", 0, type=int)
-    # Clamp parameters to safe ranges to prevent excessive queries or errors
-    limit = max(1, min(limit, 500))
-    offset = max(0, offset)
+    all_printers = request.args.get("all_printers") == "1"
+    limit = max(1, min(request.args.get("limit", 50, type=int), 500))
+    offset = max(0, request.args.get("offset", 0, type=int))
+    printer_names = _configured_printer_name_map()
     with borrow_mqtt(printer_index) as mqtt:
         if not mqtt:
             return {"entries": [], "total": 0}
-        entries = mqtt.history.get_history(limit=limit, offset=offset)
-        total = mqtt.history.get_count()
+        if all_printers:
+            entries = mqtt.history.get_history(limit=limit, offset=offset)
+            total = mqtt.history.get_count()
+        else:
+            entries = mqtt.history.get_history_for_printer(printer_index, limit=limit, offset=offset)
+            total = mqtt.history.get_count_for_printer(printer_index)
     serialized_entries = []
     for entry in entries:
         item = dict(entry)
+        pi = item.get("printer_index")
+        # Resolve a human-readable printer name; gracefully handle NULL legacy entries
+        item["printer_name"] = printer_names.get(pi, f"Printer {pi + 1}" if pi is not None else "Unknown")
         item["thumbnail_url"] = (
-            url_for("app_api_history_thumbnail", entry_id=item["id"], printer_index=printer_index)
+            url_for(
+                "app_api_history_thumbnail",
+                entry_id=item["id"],
+                printer_index=pi if pi is not None else printer_index,
+            )
             if item.get("thumbnail_available")
             else None
         )
@@ -4020,10 +4054,21 @@ def app_api_history():
 
 @app.delete("/api/history")
 def app_api_history_clear():
-    """Clear all print history."""
+    """Clear print history.
+
+    Query params:
+      all_printers=1  — clear entries for ALL printers
+      (default)       — clear only entries for the requested printer_index
+    """
     printer_index = _requested_printer_index()
+    all_printers = request.args.get("all_printers") == "1"
     with borrow_mqtt(printer_index) as mqtt:
-        mqtt.history.clear()
+        if not mqtt:
+            return {"status": "ok"}
+        if all_printers:
+            mqtt.history.clear()
+        else:
+            mqtt.history.clear_for_printer(printer_index)
     return {"status": "ok"}
 
 
