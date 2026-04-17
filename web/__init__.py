@@ -456,6 +456,26 @@ def _requested_printer_index(default=None):
     return fallback
 
 
+def _requested_all_printers():
+    if not has_request_context():
+        return False
+    raw = str(request.args.get("all_printers", "") or "").strip().lower()
+    return raw in {"1", "true", "yes", "on"}
+
+
+def _printer_name_for_index(printer_index, cfg=None):
+    if printer_index is None:
+        return None
+    try:
+        normalized = int(printer_index)
+    except (TypeError, ValueError):
+        return None
+    printer = _active_printer(cfg, printer_index=normalized)
+    if printer is None:
+        return f"Printer {normalized + 1}"
+    return getattr(printer, "name", None) or f"Printer {normalized + 1}"
+
+
 def _printer_video_supported(cfg=None, printer_index=None):
     active_index = app.config.get("printer_index", 0)
     if cfg is None and (printer_index is None or printer_index == active_index):
@@ -732,6 +752,26 @@ def borrow_mqtt(printer_index=None):
     if last_error is not None:
         raise last_error
     yield None
+
+
+def _build_history_store(printer_index=None, all_printers=False):
+    from web.service.history import PrintHistory
+
+    config_manager = app.config.get("config")
+    config_root = getattr(config_manager, "config_root", None)
+    db_path = None
+    if config_root:
+        db_path = os.path.join(str(config_root), "history.db")
+    if not db_path:
+        with borrow_mqtt(printer_index) as mqtt:
+            history = getattr(mqtt, "history", None) if mqtt else None
+            db_path = getattr(history, "_db_path", None)
+    if not db_path:
+        return None
+    return PrintHistory(
+        db_path=db_path,
+        printer_index=None if all_printers else _service_printer_index(printer_index),
+    )
 
 
 @contextmanager
@@ -4553,25 +4593,68 @@ def app_api_snapshot():
 def app_api_history():
     """Return print history as JSON with pagination."""
     printer_index = _requested_printer_index()
+    all_printers = _requested_all_printers()
     limit = request.args.get("limit", 50, type=int)
     offset = request.args.get("offset", 0, type=int)
     # Clamp parameters to safe ranges to prevent excessive queries or errors
     limit = max(1, min(limit, 500))
     offset = max(0, offset)
-    with borrow_mqtt(printer_index) as mqtt:
-        if not mqtt:
+    if all_printers:
+        history = _build_history_store(printer_index=printer_index, all_printers=True)
+        if not history:
             return {"entries": [], "total": 0}
-        entries = mqtt.history.get_history(limit=limit, offset=offset)
-        total = mqtt.history.get_count()
+        entries = history.get_history(limit=limit, offset=offset)
+        total = history.get_count()
+    else:
+        with borrow_mqtt(printer_index) as mqtt:
+            if not mqtt:
+                return {"entries": [], "total": 0}
+            entries = mqtt.history.get_history(limit=limit, offset=offset)
+            total = mqtt.history.get_count()
     serialized_entries = []
-    for entry in entries:
-        item = dict(entry)
-        item["thumbnail_url"] = (
-            url_for("app_api_history_thumbnail", entry_id=item["id"], printer_index=printer_index)
-            if item.get("thumbnail_available")
-            else None
-        )
-        serialized_entries.append(item)
+    config_manager = app.config.get("config")
+    if config_manager:
+        with config_manager.open() as cfg:
+            for entry in entries:
+                item = dict(entry)
+                item["printer_name"] = _printer_name_for_index(item.get("printer_index"), cfg=cfg)
+                if all_printers and item.get("printer_index") is None:
+                    item["can_reprint"] = False
+                item_id = item.get("id")
+                thumbnail_params = {"entry_id": item_id} if item_id is not None else None
+                if thumbnail_params is not None:
+                    if all_printers:
+                        thumbnail_params["all_printers"] = 1
+                        if item.get("printer_index") is not None:
+                            thumbnail_params["printer_index"] = item["printer_index"]
+                    else:
+                        thumbnail_params["printer_index"] = printer_index
+                item["thumbnail_url"] = (
+                    url_for("app_api_history_thumbnail", **thumbnail_params)
+                    if item.get("thumbnail_available") and thumbnail_params is not None
+                    else None
+                )
+                serialized_entries.append(item)
+    else:
+        for entry in entries:
+            item = dict(entry)
+            if all_printers and item.get("printer_index") is None:
+                item["can_reprint"] = False
+            item_id = item.get("id")
+            thumbnail_params = {"entry_id": item_id} if item_id is not None else None
+            if thumbnail_params is not None:
+                if all_printers:
+                    thumbnail_params["all_printers"] = 1
+                    if item.get("printer_index") is not None:
+                        thumbnail_params["printer_index"] = item["printer_index"]
+                else:
+                    thumbnail_params["printer_index"] = printer_index
+            item["thumbnail_url"] = (
+                url_for("app_api_history_thumbnail", **thumbnail_params)
+                if item.get("thumbnail_available") and thumbnail_params is not None
+                else None
+            )
+            serialized_entries.append(item)
     return {"entries": serialized_entries, "total": total}
 
 
@@ -4579,14 +4662,23 @@ def app_api_history():
 def app_api_history_clear():
     """Clear all print history."""
     printer_index = _requested_printer_index()
-    with borrow_mqtt(printer_index) as mqtt:
-        mqtt.history.clear()
+    if _requested_all_printers():
+        history = _build_history_store(printer_index=printer_index, all_printers=True)
+        if not history:
+            return {"error": "Service unavailable"}, 503
+        history.clear()
+    else:
+        with borrow_mqtt(printer_index) as mqtt:
+            if not mqtt:
+                return {"error": "Service unavailable"}, 503
+            mqtt.history.clear()
     return {"status": "ok"}
 
 
 @app.post("/api/history/delete")
 def app_api_history_delete_selected():
     printer_index = _requested_printer_index()
+    all_printers = _requested_all_printers()
     payload = request.get_json(silent=True) or {}
     raw_ids = payload.get("ids")
     if not isinstance(raw_ids, list):
@@ -4604,14 +4696,24 @@ def app_api_history_delete_selected():
     if not entry_ids:
         return {"error": "No history entries were selected"}, 400
 
-    with borrow_mqtt(printer_index) as mqtt:
-        if not mqtt:
+    if all_printers:
+        history = _build_history_store(printer_index=printer_index, all_printers=True)
+        if not history:
             return {"error": "Service unavailable"}, 503
-        entries = [mqtt.history.get_entry(entry_id) for entry_id in entry_ids]
+        entries = [history.get_entry(entry_id) for entry_id in entry_ids]
         active = [entry for entry in entries if entry and entry.get("status") == "started"]
         if active:
             return {"error": "Cannot delete an in-progress history entry"}, 409
-        deleted = mqtt.history.delete_entries(entry_ids)
+        deleted = history.delete_entries(entry_ids)
+    else:
+        with borrow_mqtt(printer_index) as mqtt:
+            if not mqtt:
+                return {"error": "Service unavailable"}, 503
+            entries = [mqtt.history.get_entry(entry_id) for entry_id in entry_ids]
+            active = [entry for entry in entries if entry and entry.get("status") == "started"]
+            if active:
+                return {"error": "Cannot delete an in-progress history entry"}, 409
+            deleted = mqtt.history.delete_entries(entry_ids)
 
     return {
         "status": "ok",
@@ -4625,14 +4727,24 @@ def app_api_history_thumbnail(entry_id):
     from flask import send_file
 
     printer_index = _requested_printer_index()
-    with borrow_mqtt(printer_index) as mqtt:
-        if not mqtt:
+    if _requested_all_printers():
+        history = _build_history_store(printer_index=printer_index, all_printers=True)
+        if not history:
             return {"error": "Service unavailable"}, 503
-        entry = mqtt.history.get_entry(entry_id)
+        entry = history.get_entry(entry_id)
         if not entry:
             return {"error": "History entry not found"}, 404
-        thumbnail_path = mqtt.history.get_thumbnail_path(entry_id)
+        thumbnail_path = history.get_thumbnail_path(entry_id)
         preview_url = entry.get("preview_url")
+    else:
+        with borrow_mqtt(printer_index) as mqtt:
+            if not mqtt:
+                return {"error": "Service unavailable"}, 503
+            entry = mqtt.history.get_entry(entry_id)
+            if not entry:
+                return {"error": "History entry not found"}, 404
+            thumbnail_path = mqtt.history.get_thumbnail_path(entry_id)
+            preview_url = entry.get("preview_url")
 
     if thumbnail_path:
         response = send_file(
@@ -4653,19 +4765,39 @@ def app_api_history_thumbnail(entry_id):
 @app.post("/api/history/<int:entry_id>/reprint")
 def app_api_history_reprint(entry_id):
     user_name = request.headers.get("User-Agent", "ankerctl").split(url_for('app_root'))[0]
-    printer_index = _requested_printer_index()
+    requested_printer_index = _requested_printer_index()
+    all_printers = _requested_all_printers()
+
+    if all_printers:
+        history = _build_history_store(printer_index=requested_printer_index, all_printers=True)
+        if not history:
+            return {"error": "Service unavailable"}, 503
+        entry = history.get_entry(entry_id)
+        if not entry:
+            return {"error": "History entry not found"}, 404
+        printer_index = entry.get("printer_index")
+        if printer_index is None:
+            return {"error": "This history entry is missing a printer assignment and cannot be reprinted"}, 409
+        archive_path = history.get_archive_path(entry_id)
+        if not archive_path:
+            return {"error": "No archived GCode is available for this history entry"}, 404
+    else:
+        printer_index = requested_printer_index
+        with borrow_mqtt(printer_index) as mqtt:
+            if not mqtt:
+                return {"error": "Service unavailable"}, 503
+            entry = mqtt.history.get_entry(entry_id)
+            if not entry:
+                return {"error": "History entry not found"}, 404
+            archive_path = mqtt.history.get_archive_path(entry_id)
+            if not archive_path:
+                return {"error": "No archived GCode is available for this history entry"}, 404
 
     with borrow_mqtt(printer_index) as mqtt:
         if not mqtt:
             return {"error": "Service unavailable"}, 503
         if mqtt.is_printing or mqtt.has_pending_print_start or mqtt.is_preparing_print:
             return {"error": "Printer is already busy with another print job"}, 409
-        entry = mqtt.history.get_entry(entry_id)
-        if not entry:
-            return {"error": "History entry not found"}, 404
-        archive_path = mqtt.history.get_archive_path(entry_id)
-        if not archive_path:
-            return {"error": "No archived GCode is available for this history entry"}, 404
 
     with app.config["config"].open() as cfg:
         rate_limit_mbps, rate_limit_source = cli.util.resolve_upload_rate_mbps_with_source(cfg)

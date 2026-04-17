@@ -492,6 +492,157 @@ def test_history_route_uses_requested_or_active_indexed_mqtt_service():
     assert requested.get_json()["entries"][0]["filename"] == "thing1.gcode"
 
 
+def test_history_route_supports_all_printers_admin_view(tmp_path):
+    db_path = tmp_path / "history.db"
+    history0 = PrintHistory(db_path=db_path, printer_index=0)
+    history1 = PrintHistory(db_path=db_path, printer_index=1)
+
+    history0.record_start("thing1.gcode", task_id="thing1-task")
+    history0.record_finish(task_id="thing1-task", progress=100)
+    history1.record_start("thing2.gcode", task_id="thing2-task")
+    history1.record_finish(task_id="thing2-task", progress=100)
+
+    cfg = _base_config()
+    cfg.printers = [
+        _printer(sn="SN0", name="Thing 1"),
+        _printer(sn="SN1", name="Thing 2"),
+    ]
+    services = FakeServices()
+    services._services = {
+        "mqttqueue": SimpleNamespace(history=history0),
+        "mqttqueue:0": SimpleNamespace(history=history0),
+        "mqttqueue:1": SimpleNamespace(history=history1),
+    }
+    services.svcs = dict(services._services)
+
+    client = app.test_client()
+    old_values, old_svc = _install_app_state(config=cfg)
+    app.config["config"].config_root = tmp_path
+    app.config["printer_index"] = 0
+    app.svc = services
+
+    try:
+        response = client.get("/api/history?all_printers=1", headers={"X-Api-Key": API_KEY})
+    finally:
+        _restore_app_state(old_values, old_svc)
+
+    assert response.status_code == 200
+    payload = response.get_json()
+    assert payload["total"] == 2
+    by_filename = {entry["filename"]: entry for entry in payload["entries"]}
+    assert by_filename["thing1.gcode"]["printer_name"] == "Thing 1"
+    assert by_filename["thing2.gcode"]["printer_name"] == "Thing 2"
+
+
+def test_history_delete_selected_route_supports_all_printers_admin_view(tmp_path):
+    db_path = tmp_path / "history.db"
+    history0 = PrintHistory(db_path=db_path, printer_index=0)
+    history1 = PrintHistory(db_path=db_path, printer_index=1)
+
+    row0_id = history0.record_start("thing1.gcode", task_id="thing1-task")
+    history0.record_finish(task_id="thing1-task", progress=100)
+    row1_id = history1.record_start("thing2.gcode", task_id="thing2-task")
+    history1.record_finish(task_id="thing2-task", progress=100)
+
+    cfg = _base_config()
+    cfg.printers = [
+        _printer(sn="SN0", name="Thing 1"),
+        _printer(sn="SN1", name="Thing 2"),
+    ]
+    services = FakeServices()
+    services._services = {
+        "mqttqueue": SimpleNamespace(history=history0),
+        "mqttqueue:0": SimpleNamespace(history=history0),
+        "mqttqueue:1": SimpleNamespace(history=history1),
+    }
+    services.svcs = dict(services._services)
+
+    client = app.test_client()
+    old_values, old_svc = _install_app_state(config=cfg)
+    app.config["config"].config_root = tmp_path
+    app.config["printer_index"] = 0
+    app.svc = services
+
+    try:
+        response = client.post(
+            "/api/history/delete?all_printers=1",
+            json={"ids": [row1_id]},
+            headers={"X-Api-Key": API_KEY},
+        )
+        listed = client.get("/api/history?all_printers=1", headers={"X-Api-Key": API_KEY})
+    finally:
+        _restore_app_state(old_values, old_svc)
+
+    assert response.status_code == 200
+    assert response.get_json()["deleted"] == 1
+    assert history0.get_entry(row0_id) is not None
+    assert history1.get_entry(row1_id) is None
+    assert [entry["filename"] for entry in listed.get_json()["entries"]] == ["thing1.gcode"]
+
+
+def test_history_reprint_route_uses_entry_printer_in_all_printers_mode(tmp_path):
+    db_path = tmp_path / "history.db"
+    history0 = PrintHistory(db_path=db_path, printer_index=0)
+    history1 = PrintHistory(db_path=db_path, printer_index=1)
+
+    archive = history1.archive_upload("thing2.gcode", b"G28\nM104 S210\n")
+    row1_id = history1.record_start(
+        "thing2.gcode",
+        task_id="thing2-task",
+        archive_relpath=archive["archive_relpath"],
+        archive_size=archive["archive_size"],
+    )
+    history1.record_finish(task_id="thing2-task", progress=100)
+
+    cfg = _base_config()
+    cfg.printers = [
+        _printer(sn="SN0", name="Thing 1"),
+        _printer(sn="SN1", name="Thing 2"),
+    ]
+    sent = []
+    filetransfer = SimpleNamespace(
+        send_bytes=lambda archive_bytes, filename, user_name, rate_limit_mbps=None, start_print=True, printer_index=None, archive_info=None: sent.append({
+            "filename": filename,
+            "printer_index": printer_index,
+            "archive_info": archive_info,
+            "size": len(archive_bytes),
+        })
+    )
+    services = FakeServices()
+    services._services = {
+        "mqttqueue": SimpleNamespace(history=history0, is_printing=False, has_pending_print_start=False, is_preparing_print=False),
+        "mqttqueue:0": SimpleNamespace(history=history0, is_printing=False, has_pending_print_start=False, is_preparing_print=False),
+        "mqttqueue:1": SimpleNamespace(history=history1, is_printing=False, has_pending_print_start=False, is_preparing_print=False),
+        "filetransfer": filetransfer,
+    }
+    services.svcs = dict(services._services)
+
+    client = app.test_client()
+    old_values, old_svc = _install_app_state(config=cfg)
+    app.config["config"].config_root = tmp_path
+    app.config["printer_index"] = 0
+    app.svc = services
+
+    try:
+        response = client.post(
+            f"/api/history/{row1_id}/reprint?all_printers=1",
+            headers={"X-Api-Key": API_KEY},
+        )
+    finally:
+        _restore_app_state(old_values, old_svc)
+
+    assert response.status_code == 200
+    assert sent == [{
+        "filename": "thing2.gcode",
+        "printer_index": 1,
+        "archive_info": {
+            "archive_relpath": archive["archive_relpath"],
+            "archive_size": archive["archive_size"],
+        },
+        "size": archive["archive_size"],
+    }]
+
+
 def test_history_delete_selected_route_deletes_finished_entries(tmp_path):
     history = PrintHistory(db_path=tmp_path / "history.db")
     first_id = history.record_start("one.gcode")

@@ -129,8 +129,71 @@ class PrintHistory:
                 "CREATE INDEX IF NOT EXISTS idx_print_history_task_printer "
                 "ON print_history(task_id, printer_index)"
             )
+            self._migrate_legacy_printer_scope(conn)
         except Exception as e:
             log.warning(f"History: schema migration failed: {e}")
+
+    @staticmethod
+    def _unique_printer_map(rows, key_name):
+        grouped = {}
+        for row in rows:
+            key = str(row[key_name] or "").strip()
+            if not key:
+                continue
+            try:
+                printer_index = int(row["printer_index"])
+            except (TypeError, ValueError):
+                continue
+            grouped.setdefault(key, set()).add(printer_index)
+        return {
+            key: next(iter(printer_indexes))
+            for key, printer_indexes in grouped.items()
+            if len(printer_indexes) == 1
+        }
+
+    def _migrate_legacy_printer_scope(self, conn):
+        """Claim old NULL-scoped rows only when their owning printer is unambiguous."""
+        legacy_rows = conn.execute(
+            "SELECT id, task_id, archive_relpath FROM print_history WHERE printer_index IS NULL"
+        ).fetchall()
+        if not legacy_rows:
+            return
+
+        task_map = self._unique_printer_map(
+            conn.execute(
+                "SELECT task_id, printer_index FROM print_history "
+                "WHERE printer_index IS NOT NULL AND task_id IS NOT NULL AND task_id != ''"
+            ).fetchall(),
+            "task_id",
+        )
+        archive_map = self._unique_printer_map(
+            conn.execute(
+                "SELECT archive_relpath, printer_index FROM print_history "
+                "WHERE printer_index IS NOT NULL "
+                "AND archive_relpath IS NOT NULL AND archive_relpath != ''"
+            ).fetchall(),
+            "archive_relpath",
+        )
+
+        migrated = 0
+        for row in legacy_rows:
+            candidates = set()
+            task_id = str(row["task_id"] or "").strip()
+            archive_relpath = str(row["archive_relpath"] or "").strip()
+            if task_id and task_id in task_map:
+                candidates.add(task_map[task_id])
+            if archive_relpath and archive_relpath in archive_map:
+                candidates.add(archive_map[archive_relpath])
+            if len(candidates) != 1:
+                continue
+            conn.execute(
+                "UPDATE print_history SET printer_index=? WHERE id=? AND printer_index IS NULL",
+                (next(iter(candidates)), row["id"]),
+            )
+            migrated += 1
+
+        if migrated:
+            log.info("History: claimed %s legacy row(s) with inferred printer assignments", migrated)
 
     def _select_existing_task_row(self, conn, task_id):
         if not task_id:

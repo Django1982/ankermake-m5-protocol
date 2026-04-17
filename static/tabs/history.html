@@ -6,6 +6,10 @@
                     <div class="card-header fs-5 d-flex justify-content-between align-items-center">
                         <span>{{ macro.bi_icon("clock-history") }} Print History</span>
                         <div class="d-flex gap-2">
+                            <div class="form-check form-switch d-flex align-items-center mb-0 me-2">
+                                <input class="form-check-input me-2" type="checkbox" id="history-all-printers" aria-label="Show history from all printers">
+                                <label class="form-check-label small text-nowrap" for="history-all-printers">All printers</label>
+                            </div>
                             <button class="btn btn-sm btn-outline-danger" id="history-delete-selected" disabled>
                                 {{ macro.bi_icon("trash3") }} Delete Selected
                             </button>

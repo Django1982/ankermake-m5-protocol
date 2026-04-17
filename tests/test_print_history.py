@@ -1,4 +1,5 @@
 import os
+import sqlite3
 from datetime import datetime, timezone
 
 from web.service.history import PrintHistory
@@ -65,6 +66,57 @@ def test_printer_scoped_history_claims_legacy_active_task_row(tmp_path):
     assert resumed_id == row_id
     assert entry["status"] == "finished"
     assert entry["printer_index"] == 1
+
+
+def test_legacy_null_rows_are_claimed_only_when_printer_is_unambiguous(tmp_path):
+    db_path = tmp_path / "history.db"
+    PrintHistory(db_path=db_path)
+    started_at = datetime.now(timezone.utc).replace(tzinfo=None).isoformat()
+
+    with sqlite3.connect(db_path) as conn:
+        conn.execute(
+            "INSERT INTO print_history (filename, printer_index, status, started_at, task_id) "
+            "VALUES (?, ?, ?, ?, ?)",
+            ("thing2-known.gcode", 1, "finished", started_at, "task-identified"),
+        )
+        conn.execute(
+            "INSERT INTO print_history (filename, printer_index, status, started_at, task_id) "
+            "VALUES (?, ?, ?, ?, ?)",
+            ("legacy-task.gcode", None, "finished", started_at, "task-identified"),
+        )
+        conn.execute(
+            "INSERT INTO print_history (filename, printer_index, status, started_at, archive_relpath) "
+            "VALUES (?, ?, ?, ?, ?)",
+            ("thing1-archive.gcode", 0, "finished", started_at, "shared-archive.gcode"),
+        )
+        conn.execute(
+            "INSERT INTO print_history (filename, printer_index, status, started_at, archive_relpath) "
+            "VALUES (?, ?, ?, ?, ?)",
+            ("legacy-archive.gcode", None, "finished", started_at, "shared-archive.gcode"),
+        )
+        conn.execute(
+            "INSERT INTO print_history (filename, printer_index, status, started_at, task_id) "
+            "VALUES (?, ?, ?, ?, ?)",
+            ("thing1-ambiguous.gcode", 0, "finished", started_at, "task-ambiguous"),
+        )
+        conn.execute(
+            "INSERT INTO print_history (filename, printer_index, status, started_at, task_id) "
+            "VALUES (?, ?, ?, ?, ?)",
+            ("thing2-ambiguous.gcode", 1, "finished", started_at, "task-ambiguous"),
+        )
+        conn.execute(
+            "INSERT INTO print_history (filename, printer_index, status, started_at, task_id) "
+            "VALUES (?, ?, ?, ?, ?)",
+            ("legacy-ambiguous.gcode", None, "finished", started_at, "task-ambiguous"),
+        )
+        conn.commit()
+
+    history = PrintHistory(db_path=db_path)
+    rows = {entry["filename"]: entry for entry in history.get_history(limit=20)}
+
+    assert rows["legacy-task.gcode"]["printer_index"] == 1
+    assert rows["legacy-archive.gcode"]["printer_index"] == 0
+    assert rows["legacy-ambiguous.gcode"]["printer_index"] is None
 
 
 def test_record_finish_and_fail_update_active_entries(tmp_path):
