@@ -774,6 +774,53 @@ def _build_history_store(printer_index=None, all_printers=False):
     )
 
 
+def _configured_printer_name_map(cfg=None):
+    if cfg is None:
+        config = app.config.get("config")
+        if not config:
+            return {}
+        with config.open() as opened_cfg:
+            return _configured_printer_name_map(opened_cfg)
+
+    names = {}
+    for index, printer in enumerate(getattr(cfg, "printers", []) or []):
+        names[index] = getattr(printer, "name", None) or f"Printer {index + 1}"
+    return names
+
+
+def _collect_all_printer_timelapse_media(kind):
+    printer_names = _configured_printer_name_map()
+    items = []
+    enabled = False
+
+    for printer_index, printer_name in printer_names.items():
+        with borrow_mqtt(printer_index) as mqtt:
+            if not mqtt:
+                continue
+            timelapse = getattr(mqtt, "timelapse", None)
+            if not timelapse:
+                continue
+            enabled = enabled or bool(getattr(timelapse, "enabled", False))
+            if kind == "videos":
+                records = timelapse.list_videos()
+            else:
+                records = timelapse.list_snapshots()
+            for record in records or []:
+                item = dict(record)
+                item["printer_index"] = printer_index
+                item["printer_name"] = printer_name
+                items.append(item)
+
+    items.sort(
+        key=lambda item: (
+            str(item.get("created_at") or ""),
+            str(item.get("filename") or item.get("id") or ""),
+        ),
+        reverse=True,
+    )
+    return items, enabled
+
+
 @contextmanager
 def borrow_pppp(printer_index=None, ready=True):
     last_error = None
@@ -5279,6 +5326,9 @@ def app_api_filament_service_swap_cancel():
 @app.get("/api/timelapses")
 def app_api_timelapses():
     """List available timelapse videos."""
+    if _requested_all_printers():
+        videos, enabled = _collect_all_printer_timelapse_media("videos")
+        return {"videos": videos, "enabled": enabled}
     printer_index = _requested_printer_index()
     with borrow_mqtt(printer_index) as mqtt:
         if not mqtt:
@@ -5291,6 +5341,9 @@ def app_api_timelapses():
 @app.get("/api/timelapse-snapshots")
 def app_api_timelapse_snapshots():
     """List available timelapse snapshot collections and frames."""
+    if _requested_all_printers():
+        collections, enabled = _collect_all_printer_timelapse_media("snapshots")
+        return {"collections": collections, "enabled": enabled}
     printer_index = _requested_printer_index()
     with borrow_mqtt(printer_index) as mqtt:
         if not mqtt:

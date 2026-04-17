@@ -1097,6 +1097,82 @@ def test_timelapse_media_routes_honor_requested_printer_index(tmp_path):
     assert snapshot_deleted.status_code == 200
 
 
+def test_timelapse_media_routes_support_all_printers(tmp_path):
+    cfg = _base_config()
+    cfg.printers.append(_printer("SN2", "Printer 2"))
+
+    zero_dir = tmp_path / "captures-zero"
+    zero_dir.mkdir()
+    one_dir = tmp_path / "captures-one"
+    one_dir.mkdir()
+
+    timelapse_zero = SimpleNamespace(
+        enabled=False,
+        _captures_dir=str(zero_dir),
+        list_videos=lambda: [{
+            "filename": "zero.mp4",
+            "size_bytes": 8,
+            "created_at": "2026-04-17T10:00:00",
+        }],
+        list_snapshots=lambda: [{
+            "id": "zero_capture",
+            "label": "zero.gcode",
+            "frame_count": 1,
+            "created_at": "2026-04-17T10:00:00",
+            "allow_delete": True,
+            "frames": [{"filename": "frame_00000.jpg", "size_bytes": 8}],
+        }],
+    )
+    timelapse_one = SimpleNamespace(
+        enabled=True,
+        _captures_dir=str(one_dir),
+        list_videos=lambda: [{
+            "filename": "one.mp4",
+            "size_bytes": 7,
+            "created_at": "2026-04-17T11:00:00",
+        }],
+        list_snapshots=lambda: [{
+            "id": "one_capture",
+            "label": "one.gcode",
+            "frame_count": 2,
+            "created_at": "2026-04-17T11:00:00",
+            "allow_delete": True,
+            "frames": [{"filename": "frame_00001.jpg", "size_bytes": 7}],
+        }],
+    )
+
+    mqtt_zero = SimpleNamespace(timelapse=timelapse_zero)
+    mqtt_one = SimpleNamespace(timelapse=timelapse_one)
+
+    client = app.test_client()
+    old_values, old_svc = _install_app_state(config=cfg)
+    app.svc = FakeServices(**{"mqttqueue:0": mqtt_zero, "mqttqueue:1": mqtt_one})
+
+    try:
+        listed = client.get("/api/timelapses?all_printers=1", headers={"X-Api-Key": API_KEY})
+        listed_snapshots = client.get("/api/timelapse-snapshots?all_printers=1", headers={"X-Api-Key": API_KEY})
+    finally:
+        _restore_app_state(old_values, old_svc)
+
+    assert listed.status_code == 200
+    listed_payload = listed.get_json()
+    assert listed_payload["enabled"] is True
+    assert [video["filename"] for video in listed_payload["videos"]] == ["one.mp4", "zero.mp4"]
+    assert listed_payload["videos"][0]["printer_index"] == 1
+    assert listed_payload["videos"][0]["printer_name"] == "Printer 2"
+    assert listed_payload["videos"][1]["printer_index"] == 0
+    assert listed_payload["videos"][1]["printer_name"] == "Printer"
+
+    assert listed_snapshots.status_code == 200
+    snapshots_payload = listed_snapshots.get_json()
+    assert snapshots_payload["enabled"] is True
+    assert [collection["id"] for collection in snapshots_payload["collections"]] == ["one_capture", "zero_capture"]
+    assert snapshots_payload["collections"][0]["printer_index"] == 1
+    assert snapshots_payload["collections"][0]["printer_name"] == "Printer 2"
+    assert snapshots_payload["collections"][1]["printer_index"] == 0
+    assert snapshots_payload["collections"][1]["printer_name"] == "Printer"
+
+
 def test_timelapse_current_routes_honor_requested_printer_index():
     cfg = _base_config()
     cfg.printers.append(_printer("SN2", "Printer 2"))
