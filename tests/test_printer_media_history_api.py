@@ -77,8 +77,14 @@ class FakeHistoryList:
             "thumbnail_available": False,
         }]
 
+    def get_history_for_printer(self, printer_index, limit=50, offset=0):
+        return self.get_history(limit=limit, offset=offset)
+
     def get_count(self):
         return 1
+
+    def get_count_for_printer(self, printer_index):
+        return self.get_count()
 
 
 def _install_app_state(*, mqtt=None, videoqueue=None, filetransfer=None, config=None, login=True, video_supported=True, unsupported=False):
@@ -435,8 +441,11 @@ def test_history_routes_require_auth_and_clear_entries():
     calls = []
     history = SimpleNamespace(
         get_history=lambda limit, offset: calls.append(("get", limit, offset)) or [{"filename": "cube.gcode"}],
+        get_history_for_printer=lambda printer_index, limit, offset: calls.append(("get_printer", printer_index, limit, offset)) or [{"filename": "cube.gcode"}],
         get_count=lambda: 3,
+        get_count_for_printer=lambda printer_index: 3,
         clear=lambda: calls.append(("clear",)),
+        clear_for_printer=lambda printer_index: calls.append(("clear_printer", printer_index)),
     )
     mqtt = SimpleNamespace(history=history)
     client = app.test_client()
@@ -454,7 +463,7 @@ def test_history_routes_require_auth_and_clear_entries():
     assert authorized.get_json()["total"] == 3
     assert authorized.get_json()["entries"][0]["thumbnail_url"] is None
     assert cleared.status_code == 200
-    assert calls == [("get", 500, 0), ("clear",)]
+    assert calls == [("get_printer", 0, 500, 0), ("clear_printer", 0)]
 
 
 def test_history_route_uses_requested_or_active_indexed_mqtt_service():
