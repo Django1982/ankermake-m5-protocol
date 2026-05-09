@@ -22,7 +22,7 @@ from libflagship.pppp import (
     Version,
     Xzyh,
 )
-from libflagship.ppppapi import AnkerPPPPBaseApi, Channel, FileUploadInfo, PPPP_SOCKET_RCVBUF, PPPP_SOCKET_SNDBUF
+from libflagship.ppppapi import AnkerPPPPBaseApi, Channel, FileUploadInfo, PPPP_LAN_PORT, PPPP_SOCKET_RCVBUF, PPPP_SOCKET_SNDBUF
 
 
 def _host(addr="192.168.1.25", port=32108):
@@ -188,9 +188,13 @@ def test_pppp_open_configures_udp_socket_buffers(monkeypatch):
     class FakeSocket:
         def __init__(self):
             self.calls = []
+            self.binds = []
 
         def setsockopt(self, level, optname, value):
             self.calls.append((level, optname, value))
+
+        def bind(self, addr):
+            self.binds.append(addr)
 
     monkeypatch.setattr(
         "libflagship.ppppapi.socket.socket",
@@ -205,6 +209,8 @@ def test_pppp_open_configures_udp_socket_buffers(monkeypatch):
     assert (socket.SOL_SOCKET, socket.SO_RCVBUF, PPPP_SOCKET_RCVBUF) in created[0].calls
     assert (socket.SOL_SOCKET, socket.SO_SNDBUF, PPPP_SOCKET_SNDBUF) in created[0].calls
     assert (socket.SOL_SOCKET, socket.SO_BROADCAST, 1) in created[1].calls
+    assert created[0].binds == []
+    assert created[1].binds == [('', PPPP_LAN_PORT)]
 
 
 def test_pppp_remote_close_log_is_rate_limited(monkeypatch):
