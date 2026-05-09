@@ -67,6 +67,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+ - PPPP sockets now bind to fixed local UDP port `32108` (`PPPP_LAN_PORT`) before the first `sendto`, so that printer replies are delivered to a predictable port. This makes `ankerctl` work behind a stateful firewall (e.g. ufw with default-deny-incoming) where ephemeral local ports were silently dropping the printer's `PunchPkt` and discovery replies. A single ufw rule (`sudo ufw allow in proto udp to any port 32108`) now suffices for LAN mode. WAN/cloud sessions remain ephemeral. (issue [#77](https://github.com/Django1982/ankermake-m5-protocol/issues/77); see [`documentation/issue77_code_fix.md`](documentation/issue77_code_fix.md) for the full design)
+ - `_configure_udp_socket()` gained an optional `local_port` parameter with an `EADDRINUSE` guard that raises a clear `RuntimeError` when a second `ankerctl` instance holds port `32108`.
+
 ## [1.10.9] - 2026-05-02
 
 ### Added

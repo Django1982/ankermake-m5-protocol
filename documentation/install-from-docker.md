@@ -75,3 +75,15 @@ When set, all API endpoints require authentication via one of:
 
 - **Slicer:** Set the API key as `X-Api-Key` header (OctoPrint-compatible)
 - **Browser:** Append `?apikey=your-secret-key-here` to the URL once — a session cookie will be set automatically
+
+## Firewall (ufw / Linux host)
+
+The Docker compose stack uses `network_mode: host`, so the container shares the host's network namespace and the host firewall applies. If you run `ufw` (or any stateful firewall) with the default-deny-incoming policy, the printer's PPPP responses are dropped silently and discovery hangs.
+
+Allow the LAN PPPP port:
+
+```sh
+sudo ufw allow in proto udp to any port 32108
+```
+
+This single rule covers both LAN discovery (broadcast) and the LAN session — both sockets bind locally to UDP `32108` since the fix for [issue #77](https://github.com/Django1982/ankermake-m5-protocol/issues/77). For the full background see the **Firewall / ufw** section in the main [README](../README.md#firewall--ufw).

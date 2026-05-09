@@ -19,6 +19,7 @@ dump/
 .swarm/
 .mcp.json
 .venv/
+.wiki/
 *.log
 SECURITY_AUDIT_REPORT.json
 TEST_COVERAGE_ANALYSIS.md

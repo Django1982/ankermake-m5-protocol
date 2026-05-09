@@ -633,6 +633,44 @@ Do not call this during an active print.
 ./ankerctl.py -p <index>
 ```
 
+## Firewall / ufw
+
+If you run `ankerctl` on a host with a stateful firewall such as `ufw` (Ubuntu/Debian default), the printer's UDP replies for LAN discovery and PPPP sessions can be silently dropped unless you allow the right ports. Since the fix for [issue #77](https://github.com/Django1982/ankermake-m5-protocol/issues/77), `ankerctl` binds its LAN sockets to predictable local ports, so you only need one or two static rules.
+
+### Required rule (LAN mode)
+
+```sh
+sudo ufw allow in proto udp to any port 32108
+```
+
+This single rule covers both:
+
+- the **LAN discovery broadcast** socket (`open_broadcast`, sends to `255.255.255.255:32108`)
+- the **LAN session** socket (`open_lan`, sends to `<printer-ip>:32108`)
+
+Both sockets bind locally to UDP `32108` (`PPPP_LAN_PORT`), so the printer's `PunchPkt` and follow-up replies hit the same port and the rule matches.
+
+### Optional rule (WAN / cloud mode)
+
+The cloud relay socket (`open_wan`) is intentionally left ephemeral so it does not collide with the LAN socket. Cloud responses transit NAT, which tracks the connection regardless of local port, so no extra rule is normally required. Only add the rule below if you have confirmed your environment needs it:
+
+```sh
+sudo ufw allow in proto udp to any port 32100   # only if needed for WAN mode
+```
+
+### Web UI / slicer access
+
+If you also want to reach the web UI or the slicer upload endpoint from another machine, allow the TCP port the web server is bound to (default `4470`):
+
+```sh
+sudo ufw allow in proto tcp to any port 4470
+```
+
+> **Tip**
+> If LAN discovery still hangs at "Connecting" after enabling these rules, double-check that the printer is on the same broadcast domain (no router/VLAN between the host and the printer) and that no second `ankerctl` instance is already holding port `32108` — the new bind will raise `RuntimeError: PPPP local port 32108 already in use`.
+
+For the full design rationale and the underlying socket changes in `libflagship/ppppapi.py`, see [`documentation/issue77_code_fix.md`](documentation/issue77_code_fix.md).
+
 ## Helpful Links
 
 - [GitHub Repository](https://github.com/Django1982/ankermake-m5-protocol)
@@ -640,6 +678,7 @@ Do not call this during an active print.
 - [eufyMake Support](https://support.eufymake.com/)
 - [Installation from Git](documentation/install-from-git.md)
 - [Installation from Docker](documentation/install-from-docker.md)
+- [Project Wiki](https://github.com/Django1982/ankermake-m5-protocol/wiki)
 
 ## Legal
 
