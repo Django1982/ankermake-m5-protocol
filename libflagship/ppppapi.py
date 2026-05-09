@@ -26,7 +26,7 @@ PPPP_SOCKET_SNDBUF = 256 * 1024
 _REMOTE_CLOSE_LOG_COOLDOWN = 10.0
 
 
-def _configure_udp_socket(sock, *, broadcast=False):
+def _configure_udp_socket(sock, *, broadcast=False, local_port=None):
     for opt_name, value in (
         ("SO_RCVBUF", PPPP_SOCKET_RCVBUF),
         ("SO_SNDBUF", PPPP_SOCKET_SNDBUF),
@@ -45,6 +45,18 @@ def _configure_udp_socket(sock, *, broadcast=False):
             sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
         except OSError:
             pass
+
+    if local_port is not None:
+        try:
+            sock.bind(('', local_port))
+        except OSError as e:
+            import errno
+            if e.errno == errno.EADDRINUSE:
+                raise RuntimeError(
+                    f"PPPP local port {local_port} already in use — "
+                    "is another ankerctl instance running?"
+                ) from e
+            raise
 
     return sock
 
@@ -342,7 +354,11 @@ class AnkerPPPPBaseApi(Thread):
 
     @classmethod
     def open_lan(cls, duid, host):
-        return cls.open(duid, host, PPPP_LAN_PORT)
+        sock = _configure_udp_socket(
+            socket.socket(socket.AF_INET, socket.SOCK_DGRAM),
+            local_port=PPPP_LAN_PORT,
+        )
+        return cls(sock, duid, addr=(host, PPPP_LAN_PORT))
 
     @classmethod
     def open_wan(cls, duid, host):
@@ -353,6 +369,7 @@ class AnkerPPPPBaseApi(Thread):
         sock = _configure_udp_socket(
             socket.socket(socket.AF_INET, socket.SOCK_DGRAM),
             broadcast=True,
+            local_port=PPPP_LAN_PORT,
         )
         addr = ("255.255.255.255", PPPP_LAN_PORT)
         return cls(sock, duid=None, addr=addr)
