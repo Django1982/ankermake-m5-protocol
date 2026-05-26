@@ -1234,7 +1234,7 @@ class MqttQueue(Service):
                 ha_updates["print_status"] = "paused"
             elif self._state in (PrintState.PRE_PRINT, PrintState.PRINTING):
                 ha_updates["print_status"] = "printing"
-            elif progress is not None and progress >= 100:
+            elif progress is not None and progress >= 100 and self._state == PrintState.PRINTING:
                 ha_updates["print_status"] = "complete"
 
         if ha_updates and self._ha.enabled:
