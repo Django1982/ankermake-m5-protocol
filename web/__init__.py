@@ -2354,6 +2354,19 @@ def _maybe_start_pppp_probe(reason="scheduled", printer_index=None):
         )
 
 
+def _pppp_probe_interval(fail_count: int) -> float:
+    """Return seconds to wait before the next PPPP probe.
+
+    fail_count 0-2  → 15 s (fast retry)
+    fail_count 3-10 → 60 s (steady state)
+    fail_count 11+  → doubles every 10 failures, capped at 300 s
+    """
+    if fail_count <= 2:
+        return 15.0
+    extra_doublings = max(0, (fail_count - 3) // 10)
+    return min(60.0 * (2 ** extra_doublings), 300.0)
+
+
 @sock.route("/ws/pppp-state")
 def pppp_state(sock):
     """
@@ -2439,8 +2452,8 @@ def pppp_state(sock):
                     last_probe_time = probe["last_time"]
                     probe_fail_count = probe["fail_count"]
 
-                # Short retries for first MAX_RETRIES failures; long back-off once the printer is clearly offline
-                next_interval = RETRY_INTERVAL if probe_fail_count <= MAX_RETRIES else PROBE_INTERVAL
+                # Exponential back-off: fast retries → steady 60 s → doubles every 10 failures, capped at 300 s
+                next_interval = _pppp_probe_interval(probe_fail_count)
 
                 # Also probe when PPPP was recently connected but service stopped
                 # (e.g. last video client disconnected) so the badge refreshes.

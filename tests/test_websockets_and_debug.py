@@ -602,3 +602,28 @@ def test_ws_ctrl_allows_with_session():
 @contextmanager
 def _borrow_debug(value):
     yield value
+
+
+# ---------------------------------------------------------------------------
+# _pppp_probe_interval tests
+# ---------------------------------------------------------------------------
+
+from web import _pppp_probe_interval
+
+
+def test_pppp_probe_interval_fast_retries():
+    assert _pppp_probe_interval(0) == 15.0
+    assert _pppp_probe_interval(1) == 15.0
+    assert _pppp_probe_interval(2) == 15.0
+
+
+def test_pppp_probe_interval_steady_state():
+    assert _pppp_probe_interval(3) == 60.0
+    assert _pppp_probe_interval(10) == 60.0
+
+
+def test_pppp_probe_interval_exponential_backoff():
+    assert _pppp_probe_interval(13) == 120.0   # 1 doubling
+    assert _pppp_probe_interval(23) == 240.0   # 2 doublings
+    assert _pppp_probe_interval(33) == 300.0   # capped
+    assert _pppp_probe_interval(9999) == 300.0
