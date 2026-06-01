@@ -827,10 +827,7 @@ class MqttQueue(Service):
         connection_age = now - getattr(self, "_connection_started_at", now)
         last_activity = max(self._last_message_time, getattr(self, "_connection_started_at", 0))
         silence = now - last_activity
-        if (
-            connection_age > MQTT_NO_RESPONSE_TIMEOUT_SEC
-            and silence > MQTT_NO_RESPONSE_TIMEOUT_SEC
-        ):
+        if silence > MQTT_NO_RESPONSE_TIMEOUT_SEC:
             log.warning(
                 "MQTT: No messages for %.0f s (connection age %.0f s) — reconnecting",
                 silence,

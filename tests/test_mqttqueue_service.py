@@ -1701,8 +1701,6 @@ def test_worker_run_raises_restart_signal_when_mqtt_stuck():
 
 def test_worker_run_no_restart_within_grace_period():
     """worker_run must NOT restart within the 90s grace window after (re)connect."""
-    from web.lib.service import ServiceRestartSignal
-
     queue = _queue()
     queue._connection_started_at = time.time() - 30.0
     queue._last_message_time = time.time() - 30.0
@@ -1718,3 +1716,25 @@ def test_worker_run_no_restart_within_grace_period():
 
     # Must not raise
     queue.worker_run(timeout=0.1)
+
+
+def test_worker_run_raises_restart_signal_when_no_message_ever_received():
+    """Reconnect even when _last_message_time is 0.0 (never received anything)."""
+    import pytest
+    from web.lib.service import ServiceRestartSignal
+
+    queue = _queue()
+    queue._connection_started_at = time.time() - 100.0
+    queue._last_message_time = 0.0  # never received a message — the real hot-loop scenario
+
+    class _FakeClient:
+        def fetch(self, timeout):
+            return []
+        def query(self, cmd):
+            pass
+
+    queue.client = _FakeClient()
+    queue._last_query = time.time()
+
+    with pytest.raises(ServiceRestartSignal):
+        queue.worker_run(timeout=0.1)
