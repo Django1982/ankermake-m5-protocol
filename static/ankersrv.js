@@ -1472,15 +1472,15 @@ $(function () {
 
     function triggerMqttReconnect(e) {
         if (e) e.preventDefault();
-        $.post("/api/mqtt/reconnect").fail(function(r) {
-            console.warn("mqtt reconnect failed", r.status);
-        });
+        fetch(withActivePrinterQuery("/api/mqtt/reconnect"), { method: "POST" })
+            .catch(function(err) { console.warn("mqtt reconnect failed", err); });
         // Optimistically hide and reset timer so we don't double-trigger
         _mqttLastMessageAt = Date.now();
         _updateMqttReconnectButton();
     }
 
     setInterval(_updateMqttReconnectButton, 5000);
+    $(document).on("click", "#btn-mqtt-reconnect", triggerMqttReconnect);
 
     sockets.mqtt = new AutoWebSocket({
         name: "mqtt socket",
