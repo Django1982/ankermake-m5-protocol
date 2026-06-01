@@ -152,6 +152,7 @@ class MqttQueue(Service):
         self._reset_print_state()
         self._gcode_layer_count = None  # Override from GCode header, survives print resets
         self._last_message_time = 0.0
+        self._silent_reconnect_count = 0  # Persists across reconnects; only reset on real message
         self._nozzle_temp = None
         self._nozzle_temp_target = None
         self._nozzle_temp_updated_at = 0.0
@@ -201,7 +202,6 @@ class MqttQueue(Service):
         self._ha.update_state(mqtt_connected=True)
         self._last_query = 0
         self._connection_started_at = time.time()
-        self._silent_reconnect_count = 0
         self._timelapse_start_prompt_window_until = (
             time.monotonic() + TIMELAPSE_START_PROMPT_BOOT_WINDOW_SEC
         )

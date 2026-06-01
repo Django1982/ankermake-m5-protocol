@@ -1748,7 +1748,7 @@ def test_worker_run_increments_silent_count_and_uses_backoff():
     queue = _queue()
     queue._connection_started_at = time.time() - 100.0
     queue._last_message_time = time.time() - 100.0
-    queue._silent_reconnect_count = 3
+    queue._silent_reconnect_count = 3  # pre-seeded: in production this accumulates via worker_init (not worker_start)
 
     class _FakeClient:
         def fetch(self, timeout): return []
@@ -1791,3 +1791,41 @@ def test_worker_run_resets_silent_count_on_message():
 
     queue.worker_run(timeout=0.1)
     assert queue._silent_reconnect_count == 0
+
+
+def test_silent_reconnect_count_accumulates_across_reconnects():
+    """Counter must persist across worker_start() calls so back-off actually escalates."""
+    import pytest
+    from web.lib.service import ServiceRestartSignal
+
+    queue = _queue()
+
+    class _FakeClient:
+        def fetch(self, timeout): return []
+        def query(self, cmd): pass
+
+    def _make_stuck_queue():
+        queue._connection_started_at = time.time() - 100.0
+        queue._last_message_time = time.time() - 100.0
+        queue.client = _FakeClient()
+        queue._last_query = time.time()
+
+    # Simulate worker_init (initialises _silent_reconnect_count = 0)
+    queue._silent_reconnect_count = 0
+
+    delays = []
+    for _ in range(5):
+        # Simulate worker_start() — the key check: it must NOT reset the counter
+        queue._connection_started_at = time.time() - 100.0
+        _make_stuck_queue()
+
+        with pytest.raises(ServiceRestartSignal) as exc_info:
+            queue.worker_run(timeout=0.1)
+        delays.append(exc_info.value.delay)
+
+    # First 3 should be 1s, 4th should be 60s, 5th should be 120s
+    assert delays[0] == 1.0
+    assert delays[1] == 1.0
+    assert delays[2] == 1.0
+    assert delays[3] == 60.0
+    assert delays[4] == 120.0, f"Expected 120s on 5th silence, got {delays[4]}"
