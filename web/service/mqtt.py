@@ -189,6 +189,15 @@ class MqttQueue(Service):
         """Store the layer count extracted from a GCode header for UI display."""
         self._gcode_layer_count = count
 
+    def reset_reconnect_backoff(self):
+        """Cancel any reconnect back-off and attempt connection immediately.
+
+        Called when a new WebSocket client connects or the user clicks Reconnect.
+        Only effective when the service is in a Starting/holdoff state.
+        """
+        self._silent_reconnect_count = 0
+        self.wake()
+
     def worker_start(self):
         mqtt_ca_cert = app.config.get("mqtt_ca_cert") or cli.model.default_mqtt_ca_cert()
         self.client = cli.mqtt.mqtt_open(

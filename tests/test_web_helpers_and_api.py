@@ -843,3 +843,35 @@ def test_apikey_url_param_redirects_and_sets_session():
                 "Session should be authenticated after ?apikey= API access"
     finally:
         app.config["api_key"] = old_api_key
+
+
+def test_mqtt_reconnect_endpoint_calls_reset_backoff():
+    """POST /api/mqtt/reconnect must call reset_reconnect_backoff() and return 200."""
+    from types import SimpleNamespace
+    client = app.test_client()
+    calls = []
+    fake_mqtt = SimpleNamespace(
+        _silent_reconnect_count=5,
+        reset_reconnect_backoff=lambda: calls.append("reset"),
+        wake=lambda: None,
+    )
+    old_svc = app.svc
+    old_login = app.config.get("login")
+    old_api_key = app.config.get("api_key")
+    old_printer_index = app.config.get("printer_index")
+    app.config["login"] = True
+    app.config["api_key"] = None
+    app.config["printer_index"] = 0
+    # Use both naming conventions to cover legacy and index-based lookup
+    app.svc = FakeServices()
+    app.svc.svcs["mqttqueue"] = fake_mqtt
+    try:
+        resp = client.post("/api/mqtt/reconnect")
+        assert resp.status_code == 200, f"Expected 200, got {resp.status_code}: {resp.data}"
+        assert resp.get_json()["status"] == "ok"
+        assert calls == ["reset"]
+    finally:
+        app.svc = old_svc
+        app.config["login"] = old_login
+        app.config["api_key"] = old_api_key
+        app.config["printer_index"] = old_printer_index

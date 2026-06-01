@@ -2228,6 +2228,13 @@ def mqtt(sock):
         return
 
     printer_index = _requested_printer_index()
+    # Cancel any reconnect back-off — the user just opened a browser tab,
+    # which means they expect the connection to be live.
+    _mqtt_svc_ref = get_mqtt_service(printer_index)
+    if _mqtt_svc_ref is not None and getattr(_mqtt_svc_ref, "_silent_reconnect_count", 0) >= 3:
+        if hasattr(_mqtt_svc_ref, "reset_reconnect_backoff"):
+            log.info("/ws/mqtt: new client connected, cancelling MQTT reconnect back-off")
+            _mqtt_svc_ref.reset_reconnect_backoff()
     try:
         for data in stream_mqtt(printer_index):
             log.debug(f"MQTT message: {data}")
@@ -3611,6 +3618,19 @@ def app_api_printer_autolevel():
             return {"error": "Auto-leveling blocked while printing"}, 409
         mqtt.send_auto_leveling()
     return {"status": "ok"}
+
+
+@app.post("/api/mqtt/reconnect")
+def app_api_mqtt_reconnect():
+    """Cancel MQTT reconnect back-off and attempt connection immediately."""
+    _check_api_key()
+    printer_index = _requested_printer_index()
+    mqtt_svc = get_mqtt_service(printer_index)
+    if mqtt_svc is None:
+        return jsonify({"status": "no_service"}), 404
+    if hasattr(mqtt_svc, "reset_reconnect_backoff"):
+        mqtt_svc.reset_reconnect_backoff()
+    return jsonify({"status": "ok"})
 
 
 @app.get("/api/printer/z-offset")
