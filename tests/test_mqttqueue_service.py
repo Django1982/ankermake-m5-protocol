@@ -1675,3 +1675,46 @@ def test_get_state_during_pause():
     assert state["in_pre_print_window"] is False
     assert state["preparing"] is False, "is_preparing_print should be False during PAUSED"
     assert state["state_label"] == "preparing_or_aborted"
+
+
+def test_worker_run_raises_restart_signal_when_mqtt_stuck():
+    """worker_run raises ServiceRestartSignal when no messages for 90s."""
+    import pytest
+    from web.lib.service import ServiceRestartSignal
+
+    queue = _queue()
+    queue._connection_started_at = time.time() - 100.0
+    queue._last_message_time = time.time() - 100.0
+
+    class _FakeClient:
+        def fetch(self, timeout):
+            return []
+        def query(self, cmd):
+            pass
+
+    queue.client = _FakeClient()
+    queue._last_query = time.time()
+
+    with pytest.raises(ServiceRestartSignal):
+        queue.worker_run(timeout=0.1)
+
+
+def test_worker_run_no_restart_within_grace_period():
+    """worker_run must NOT restart within the 90s grace window after (re)connect."""
+    from web.lib.service import ServiceRestartSignal
+
+    queue = _queue()
+    queue._connection_started_at = time.time() - 30.0
+    queue._last_message_time = time.time() - 30.0
+
+    class _FakeClient:
+        def fetch(self, timeout):
+            return []
+        def query(self, cmd):
+            pass
+
+    queue.client = _FakeClient()
+    queue._last_query = time.time()
+
+    # Must not raise
+    queue.worker_run(timeout=0.1)

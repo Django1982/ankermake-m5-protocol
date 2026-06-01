@@ -4,7 +4,7 @@ import threading
 import time
 from enum import Enum
 
-from ..lib.service import Service
+from ..lib.service import Service, ServiceRestartSignal
 from .. import app
 
 from libflagship.util import enhex
@@ -76,6 +76,7 @@ STOP_CONFIRMATION_COMMAND_TYPES = {
 }
 
 G28_DEDUPE_WINDOW_SEC = 10.0
+MQTT_NO_RESPONSE_TIMEOUT_SEC = 90.0
 STORED_FILE_SELECTION_TIMEOUT_SEC = 2.0
 STORED_FILE_START_CONFIRM_TIMEOUT_SEC = 12.0
 STORED_FILE_ONBOARD_START_CONFIRM_TIMEOUT_SEC = 20.0
@@ -199,6 +200,7 @@ class MqttQueue(Service):
         self._ha.start()
         self._ha.update_state(mqtt_connected=True)
         self._last_query = 0
+        self._connection_started_at = time.time()
         self._timelapse_start_prompt_window_until = (
             time.monotonic() + TIMELAPSE_START_PROMPT_BOOT_WINDOW_SEC
         )
@@ -820,8 +822,23 @@ class MqttQueue(Service):
         )
 
     def worker_run(self, timeout):
-        # Poll status every 10 seconds if idle
         now = time.time()
+
+        connection_age = now - getattr(self, "_connection_started_at", now)
+        last_activity = max(self._last_message_time, getattr(self, "_connection_started_at", 0))
+        silence = now - last_activity
+        if (
+            connection_age > MQTT_NO_RESPONSE_TIMEOUT_SEC
+            and silence > MQTT_NO_RESPONSE_TIMEOUT_SEC
+        ):
+            log.warning(
+                "MQTT: No messages for %.0f s (connection age %.0f s) — reconnecting",
+                silence,
+                connection_age,
+            )
+            raise ServiceRestartSignal("MQTT connection stuck: no messages received")
+
+        # Poll status every 10 seconds if idle
         if now - self._last_query > 10.0:
             self._send_status_query()
             self._last_query = now
