@@ -258,3 +258,15 @@ def test_service_start_failure_logging_suppresses_duplicate_tracebacks(monkeypat
         "DummyService: Failed to start worker: No printer IP found. Retrying in 1 second. (seen 5 times)",
     )
     assert len(records) == 3
+
+
+def test_service_restart_signal_default_delay():
+    from web.lib.service import ServiceRestartSignal
+    sig = ServiceRestartSignal("test")
+    assert sig.delay == 1.0
+
+
+def test_service_restart_signal_custom_delay():
+    from web.lib.service import ServiceRestartSignal
+    sig = ServiceRestartSignal("test", delay=120.0)
+    assert sig.delay == 120.0

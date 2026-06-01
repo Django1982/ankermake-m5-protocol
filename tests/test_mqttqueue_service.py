@@ -1738,3 +1738,56 @@ def test_worker_run_raises_restart_signal_when_no_message_ever_received():
 
     with pytest.raises(ServiceRestartSignal):
         queue.worker_run(timeout=0.1)
+
+
+def test_worker_run_increments_silent_count_and_uses_backoff():
+    """Each stuck reconnect increments the counter and grows the delay."""
+    import pytest
+    from web.lib.service import ServiceRestartSignal
+
+    queue = _queue()
+    queue._connection_started_at = time.time() - 100.0
+    queue._last_message_time = time.time() - 100.0
+    queue._silent_reconnect_count = 3
+
+    class _FakeClient:
+        def fetch(self, timeout): return []
+        def query(self, cmd): pass
+
+    queue.client = _FakeClient()
+    queue._last_query = time.time()
+
+    with pytest.raises(ServiceRestartSignal) as exc_info:
+        queue.worker_run(timeout=0.1)
+
+    sig = exc_info.value
+    assert queue._silent_reconnect_count == 4
+    assert sig.delay == 60.0, f"Expected 60s holdoff for count=4, got {sig.delay}"
+
+
+def test_worker_run_resets_silent_count_on_message():
+    """Receiving any message resets _silent_reconnect_count to 0."""
+    from types import SimpleNamespace
+
+    queue = _queue()
+    queue._connection_started_at = time.time() - 5.0
+    queue._last_message_time = time.time() - 5.0
+    queue._silent_reconnect_count = 7
+
+    from libflagship.mqtt import MqttMsgType
+    fake_msg = SimpleNamespace(topic="test", payload=b"")
+    fake_body = [{"commandType": MqttMsgType.ZZ_MQTT_CMD_APP_QUERY_STATUS.value}]
+
+    class _FakeClient:
+        def fetch(self, timeout): return [(fake_msg, fake_body)]
+        def query(self, cmd): pass
+
+    queue.client = _FakeClient()
+    queue._last_query = time.time()
+    queue.notify = lambda obj: None
+    queue._forward_to_ha = lambda obj: None
+    queue._handle_notification = lambda obj: None
+    queue._handle_z_offset_update = lambda obj: None
+
+    queue.worker_run(timeout=0.1)
+    assert queue._silent_reconnect_count == 0

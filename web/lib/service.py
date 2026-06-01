@@ -44,7 +44,9 @@ class ServiceSignal(Exception):
 
 
 class ServiceRestartSignal(ServiceSignal):
-    pass
+    def __init__(self, msg="", delay: float = 1.0):
+        super().__init__(msg)
+        self.delay = delay
 
 
 class RunState(Enum):

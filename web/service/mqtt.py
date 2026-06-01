@@ -201,6 +201,7 @@ class MqttQueue(Service):
         self._ha.update_state(mqtt_connected=True)
         self._last_query = 0
         self._connection_started_at = time.time()
+        self._silent_reconnect_count = 0
         self._timelapse_start_prompt_window_until = (
             time.monotonic() + TIMELAPSE_START_PROMPT_BOOT_WINDOW_SEC
         )
@@ -828,12 +829,18 @@ class MqttQueue(Service):
         last_activity = max(self._last_message_time, getattr(self, "_connection_started_at", 0))
         silence = now - last_activity
         if silence > MQTT_NO_RESPONSE_TIMEOUT_SEC:
+            count = getattr(self, "_silent_reconnect_count", 0) + 1
+            self._silent_reconnect_count = count
+            if count <= 3:
+                holdoff = 1.0
+            else:
+                holdoff = min(60.0 * (2 ** (count - 4)), 300.0)
             log.warning(
-                "MQTT: No messages for %.0f s (connection age %.0f s) — reconnecting",
-                silence,
-                connection_age,
+                "MQTT: No messages for %.0f s (connection age %.0f s, silent_count=%d) "
+                "— reconnecting in %.0f s",
+                silence, connection_age, count, holdoff,
             )
-            raise ServiceRestartSignal("MQTT connection stuck: no messages received")
+            raise ServiceRestartSignal("MQTT connection stuck: no messages received", delay=holdoff)
 
         # Poll status every 10 seconds if idle
         if now - self._last_query > 10.0:
@@ -842,6 +849,7 @@ class MqttQueue(Service):
 
         for msg, body in self.client.fetch(timeout=timeout):
             self._last_message_time = time.time()
+            self._silent_reconnect_count = 0
             log.debug(f"TOPIC [{msg.topic}]")
             log.debug(enhex(msg.payload[:]))
             if body and getattr(self, "_debug_log_payloads", False):
