@@ -9,6 +9,7 @@ from datetime import datetime, timedelta
 import queue
 from queue import Queue
 
+_SERVICE_MIN_ITERATION_SEC = 0.010
 _START_FAILURE_REPEAT_NOTICE_SECONDS = 10.0
 _START_FAILURE_REPEAT_NOTICE_COUNT = 5
 _REPLACE_SERVICE_STOP_TIMEOUT_SECONDS = 5.0
@@ -89,6 +90,15 @@ class Service(Thread):
             return
         log.info(f"{self.name}: Requesting stop")
         self.wanted = False
+        self._event.set()
+
+    def wake(self):
+        """Cancel the current holdoff and wake the service thread immediately.
+
+        Safe to call from any thread. Used when an external event means the
+        service should stop waiting (e.g. a new WebSocket client connected).
+        """
+        self._holdoff.deadline = datetime.now()
         self._event.set()
 
     def restart(self):
@@ -186,17 +196,24 @@ class Service(Thread):
             self.state = RunState.Running
 
     def _attempt_run(self):
+        _t0 = time.monotonic()
         try:
             self.worker_run(timeout=0.1)
-        except ServiceRestartSignal:
+        except ServiceRestartSignal as sig:
             log.info(f"{self.name}: Service requested restart.")
-            self._holdoff.reset(delay=1)
+            self._holdoff.reset(delay=getattr(sig, 'delay', 1.0))
             self.state = RunState.Stopping
+            return
         except Exception:
             log.exception(f"{self.name}: Unexpected exception while running worker")
             log.warning(f"{self.name}: Stopping worker due to exception")
             self._holdoff.reset()
             self.state = RunState.Stopping
+            return
+        _elapsed = time.monotonic() - _t0
+        _remaining = _SERVICE_MIN_ITERATION_SEC - _elapsed
+        if _remaining > 0:
+            time.sleep(_remaining)
 
     def _attempt_stop(self):
         try:

@@ -183,6 +183,42 @@ def test_service_stream_bounded_queue_drops_oldest_items():
     assert q.get_nowait() == "three"
 
 
+import time as _time
+
+
+def test_attempt_run_floor_prevents_busy_loop():
+    """_attempt_run must not complete in less than 10 ms even if worker_run is instant."""
+
+    class InstantService(Service):
+        def worker_run(self, timeout):
+            pass  # returns immediately
+
+    svc = InstantService()
+    svc.state = RunState.Running
+    svc.wanted = True
+
+    t0 = _time.monotonic()
+    svc._attempt_run()
+    elapsed = _time.monotonic() - t0
+
+    svc.shutdown()
+    assert elapsed >= 0.009, f"_attempt_run returned in {elapsed*1000:.1f} ms, expected >= 10 ms"
+
+
+def test_service_wake_cancels_holdoff():
+    """wake() must expire the holdoff so the service thread doesn't wait."""
+    from datetime import datetime, timedelta
+
+    svc = DummyService()
+    # Set a long holdoff
+    svc._holdoff.reset(delay=300)
+    assert not svc._holdoff.passed, "holdoff should not have passed yet"
+
+    svc.wake()
+    assert svc._holdoff.passed, "wake() must expire the holdoff immediately"
+    svc.shutdown()
+
+
 def test_service_start_failure_logging_suppresses_duplicate_tracebacks(monkeypatch):
     svc = object.__new__(DummyService)
     svc._reset_start_failure_tracking()
