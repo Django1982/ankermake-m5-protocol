@@ -2401,11 +2401,8 @@ def pppp_state(sock):
     mqtt_was_stale = False      # tracks previous stale state to detect recovery
 
     # Scheduling constants
-    PROBE_INTERVAL = 60.0    # back-off interval after MAX_RETRIES failures
-    RETRY_INTERVAL = 15.0    # interval between retries after a failure
     PROBE_SUCCESS_FRESH_SEC = 5.0  # only trust cached probe success briefly
     MQTT_STALE_AFTER = 30.0  # MQTT considered stale after 30s silence
-    MAX_RETRIES = 2          # retries after first failure before switching to PROBE_INTERVAL
 
     # Register this client and kick off an immediate probe if we're the first.
     probe = _get_pppp_probe_state(printer_index)
