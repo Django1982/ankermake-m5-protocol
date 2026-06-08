@@ -1457,12 +1457,43 @@ $(function () {
      */
     const sockets = {};
 
+    // MQTT staleness tracking for Reconnect button
+    var _mqttLastMessageAt = 0;
+    var _mqttReconnectVisible = false;
+
+    function _updateMqttReconnectButton() {
+        if (!$("#mqtt-reconnect-hint").length) return;
+        var stale = _mqttLastMessageAt > 0 && (Date.now() - _mqttLastMessageAt) > 90000;
+        if (stale !== _mqttReconnectVisible) {
+            _mqttReconnectVisible = stale;
+            $("#mqtt-reconnect-hint").toggle(stale);
+        }
+    }
+
+    function triggerMqttReconnect(e) {
+        if (e) e.preventDefault();
+        fetch(withActivePrinterQuery("/api/mqtt/reconnect"), { method: "POST" })
+            .catch(function(err) { console.warn("mqtt reconnect failed", err); });
+        // Optimistically hide and reset timer so we don't double-trigger
+        _mqttLastMessageAt = Date.now();
+        _updateMqttReconnectButton();
+    }
+
+    setInterval(_updateMqttReconnectButton, 5000);
+    $(document).on("click", "#btn-mqtt-reconnect", triggerMqttReconnect);
+
     sockets.mqtt = new AutoWebSocket({
         name: "mqtt socket",
         url: `${location.protocol.replace("http", "ws")}//${location.host}/ws/mqtt?printer_index=${encodeURIComponent(getActivePrinterIndex())}`,
         badge: "#badge-mqtt",
 
+        opened: function () {
+            _mqttLastMessageAt = Date.now();
+            _updateMqttReconnectButton();
+        },
+
         message: function (ev) {
+            _mqttLastMessageAt = Date.now();
             let data = null;
             try {
                 data = JSON.parse(ev.data);

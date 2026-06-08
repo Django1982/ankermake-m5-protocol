@@ -1675,3 +1675,157 @@ def test_get_state_during_pause():
     assert state["in_pre_print_window"] is False
     assert state["preparing"] is False, "is_preparing_print should be False during PAUSED"
     assert state["state_label"] == "preparing_or_aborted"
+
+
+def test_worker_run_raises_restart_signal_when_mqtt_stuck():
+    """worker_run raises ServiceRestartSignal when no messages for 90s."""
+    import pytest
+    from web.lib.service import ServiceRestartSignal
+
+    queue = _queue()
+    queue._connection_started_at = time.time() - 100.0
+    queue._last_message_time = time.time() - 100.0
+
+    class _FakeClient:
+        def fetch(self, timeout):
+            return []
+        def query(self, cmd):
+            pass
+
+    queue.client = _FakeClient()
+    queue._last_query = time.time()
+
+    with pytest.raises(ServiceRestartSignal):
+        queue.worker_run(timeout=0.1)
+
+
+def test_worker_run_no_restart_within_grace_period():
+    """worker_run must NOT restart within the 90s grace window after (re)connect."""
+    queue = _queue()
+    queue._connection_started_at = time.time() - 30.0
+    queue._last_message_time = time.time() - 30.0
+
+    class _FakeClient:
+        def fetch(self, timeout):
+            return []
+        def query(self, cmd):
+            pass
+
+    queue.client = _FakeClient()
+    queue._last_query = time.time()
+
+    # Must not raise
+    queue.worker_run(timeout=0.1)
+
+
+def test_worker_run_raises_restart_signal_when_no_message_ever_received():
+    """Reconnect even when _last_message_time is 0.0 (never received anything)."""
+    import pytest
+    from web.lib.service import ServiceRestartSignal
+
+    queue = _queue()
+    queue._connection_started_at = time.time() - 100.0
+    queue._last_message_time = 0.0  # never received a message — the real hot-loop scenario
+
+    class _FakeClient:
+        def fetch(self, timeout):
+            return []
+        def query(self, cmd):
+            pass
+
+    queue.client = _FakeClient()
+    queue._last_query = time.time()
+
+    with pytest.raises(ServiceRestartSignal):
+        queue.worker_run(timeout=0.1)
+
+
+def test_worker_run_increments_silent_count_and_uses_backoff():
+    """Each stuck reconnect increments the counter and grows the delay."""
+    import pytest
+    from web.lib.service import ServiceRestartSignal
+
+    queue = _queue()
+    queue._connection_started_at = time.time() - 100.0
+    queue._last_message_time = time.time() - 100.0
+    queue._silent_reconnect_count = 3  # pre-seeded: in production this accumulates via worker_init (not worker_start)
+
+    class _FakeClient:
+        def fetch(self, timeout): return []
+        def query(self, cmd): pass
+
+    queue.client = _FakeClient()
+    queue._last_query = time.time()
+
+    with pytest.raises(ServiceRestartSignal) as exc_info:
+        queue.worker_run(timeout=0.1)
+
+    sig = exc_info.value
+    assert queue._silent_reconnect_count == 4
+    assert sig.delay == 60.0, f"Expected 60s holdoff for count=4, got {sig.delay}"
+
+
+def test_worker_run_resets_silent_count_on_message():
+    """Receiving any message resets _silent_reconnect_count to 0."""
+    from types import SimpleNamespace
+
+    queue = _queue()
+    queue._connection_started_at = time.time() - 5.0
+    queue._last_message_time = time.time() - 5.0
+    queue._silent_reconnect_count = 7
+
+    from libflagship.mqtt import MqttMsgType
+    fake_msg = SimpleNamespace(topic="test", payload=b"")
+    fake_body = [{"commandType": MqttMsgType.ZZ_MQTT_CMD_APP_QUERY_STATUS.value}]
+
+    class _FakeClient:
+        def fetch(self, timeout): return [(fake_msg, fake_body)]
+        def query(self, cmd): pass
+
+    queue.client = _FakeClient()
+    queue._last_query = time.time()
+    queue.notify = lambda obj: None
+    queue._forward_to_ha = lambda obj: None
+    queue._handle_notification = lambda obj: None
+    queue._handle_z_offset_update = lambda obj: None
+
+    queue.worker_run(timeout=0.1)
+    assert queue._silent_reconnect_count == 0
+
+
+def test_silent_reconnect_count_accumulates_across_reconnects():
+    """Counter must persist across worker_start() calls so back-off actually escalates."""
+    import pytest
+    from web.lib.service import ServiceRestartSignal
+
+    queue = _queue()
+
+    class _FakeClient:
+        def fetch(self, timeout): return []
+        def query(self, cmd): pass
+
+    def _make_stuck_queue():
+        queue._connection_started_at = time.time() - 100.0
+        queue._last_message_time = time.time() - 100.0
+        queue.client = _FakeClient()
+        queue._last_query = time.time()
+
+    # Simulate worker_init (initialises _silent_reconnect_count = 0)
+    queue._silent_reconnect_count = 0
+
+    delays = []
+    for _ in range(5):
+        # Simulate worker_start() — the key check: it must NOT reset the counter
+        queue._connection_started_at = time.time() - 100.0
+        _make_stuck_queue()
+
+        with pytest.raises(ServiceRestartSignal) as exc_info:
+            queue.worker_run(timeout=0.1)
+        delays.append(exc_info.value.delay)
+
+    # First 3 should be 1s, 4th should be 60s, 5th should be 120s
+    assert delays[0] == 1.0
+    assert delays[1] == 1.0
+    assert delays[2] == 1.0
+    assert delays[3] == 60.0
+    assert delays[4] == 120.0, f"Expected 120s on 5th silence, got {delays[4]}"

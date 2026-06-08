@@ -2228,6 +2228,13 @@ def mqtt(sock):
         return
 
     printer_index = _requested_printer_index()
+    # Cancel any reconnect back-off — the user just opened a browser tab,
+    # which means they expect the connection to be live.
+    _mqtt_svc_ref = get_mqtt_service(printer_index)
+    if _mqtt_svc_ref is not None and getattr(_mqtt_svc_ref, "_silent_reconnect_count", 0) >= 3:
+        if hasattr(_mqtt_svc_ref, "reset_reconnect_backoff"):
+            log.info("/ws/mqtt: new client connected, cancelling MQTT reconnect back-off")
+            _mqtt_svc_ref.reset_reconnect_backoff()
     try:
         for data in stream_mqtt(printer_index):
             log.debug(f"MQTT message: {data}")
@@ -2354,6 +2361,19 @@ def _maybe_start_pppp_probe(reason="scheduled", printer_index=None):
         )
 
 
+def _pppp_probe_interval(fail_count: int) -> float:
+    """Return seconds to wait before the next PPPP probe.
+
+    fail_count 0-2  → 15 s (fast retry)
+    fail_count 3-10 → 60 s (steady state)
+    fail_count 11+  → doubles every 10 failures, capped at 300 s
+    """
+    if fail_count <= 2:
+        return 15.0
+    extra_doublings = max(0, (fail_count - 3) // 10)
+    return min(60.0 * (2 ** extra_doublings), 300.0)
+
+
 @sock.route("/ws/pppp-state")
 def pppp_state(sock):
     """
@@ -2388,11 +2408,8 @@ def pppp_state(sock):
     mqtt_was_stale = False      # tracks previous stale state to detect recovery
 
     # Scheduling constants
-    PROBE_INTERVAL = 60.0    # back-off interval after MAX_RETRIES failures
-    RETRY_INTERVAL = 15.0    # interval between retries after a failure
     PROBE_SUCCESS_FRESH_SEC = 5.0  # only trust cached probe success briefly
     MQTT_STALE_AFTER = 30.0  # MQTT considered stale after 30s silence
-    MAX_RETRIES = 2          # retries after first failure before switching to PROBE_INTERVAL
 
     # Register this client and kick off an immediate probe if we're the first.
     probe = _get_pppp_probe_state(printer_index)
@@ -2439,8 +2456,8 @@ def pppp_state(sock):
                     last_probe_time = probe["last_time"]
                     probe_fail_count = probe["fail_count"]
 
-                # Short retries for first MAX_RETRIES failures; long back-off once the printer is clearly offline
-                next_interval = RETRY_INTERVAL if probe_fail_count <= MAX_RETRIES else PROBE_INTERVAL
+                # Exponential back-off: fast retries → steady 60 s → doubles every 10 failures, capped at 300 s
+                next_interval = _pppp_probe_interval(probe_fail_count)
 
                 # Also probe when PPPP was recently connected but service stopped
                 # (e.g. last video client disconnected) so the badge refreshes.
@@ -3601,6 +3618,19 @@ def app_api_printer_autolevel():
             return {"error": "Auto-leveling blocked while printing"}, 409
         mqtt.send_auto_leveling()
     return {"status": "ok"}
+
+
+@app.post("/api/mqtt/reconnect")
+def app_api_mqtt_reconnect():
+    """Cancel MQTT reconnect back-off and attempt connection immediately."""
+    _check_api_key()
+    printer_index = _requested_printer_index()
+    mqtt_svc = get_mqtt_service(printer_index)
+    if mqtt_svc is None:
+        return jsonify({"status": "no_service"}), 404
+    if hasattr(mqtt_svc, "reset_reconnect_backoff"):
+        mqtt_svc.reset_reconnect_backoff()
+    return jsonify({"status": "ok"})
 
 
 @app.get("/api/printer/z-offset")

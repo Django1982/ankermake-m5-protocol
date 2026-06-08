@@ -4,7 +4,7 @@ import threading
 import time
 from enum import Enum
 
-from ..lib.service import Service
+from ..lib.service import Service, ServiceRestartSignal
 from .. import app
 
 from libflagship.util import enhex
@@ -76,6 +76,7 @@ STOP_CONFIRMATION_COMMAND_TYPES = {
 }
 
 G28_DEDUPE_WINDOW_SEC = 10.0
+MQTT_NO_RESPONSE_TIMEOUT_SEC = 90.0
 STORED_FILE_SELECTION_TIMEOUT_SEC = 2.0
 STORED_FILE_START_CONFIRM_TIMEOUT_SEC = 12.0
 STORED_FILE_ONBOARD_START_CONFIRM_TIMEOUT_SEC = 20.0
@@ -151,6 +152,7 @@ class MqttQueue(Service):
         self._reset_print_state()
         self._gcode_layer_count = None  # Override from GCode header, survives print resets
         self._last_message_time = 0.0
+        self._silent_reconnect_count = 0  # Persists across reconnects; only reset on real message
         self._nozzle_temp = None
         self._nozzle_temp_target = None
         self._nozzle_temp_updated_at = 0.0
@@ -187,6 +189,15 @@ class MqttQueue(Service):
         """Store the layer count extracted from a GCode header for UI display."""
         self._gcode_layer_count = count
 
+    def reset_reconnect_backoff(self):
+        """Cancel any reconnect back-off and attempt connection immediately.
+
+        Called when a new WebSocket client connects or the user clicks Reconnect.
+        Only effective when the service is in a Starting/holdoff state.
+        """
+        self._silent_reconnect_count = 0
+        self.wake()
+
     def worker_start(self):
         mqtt_ca_cert = app.config.get("mqtt_ca_cert") or cli.model.default_mqtt_ca_cert()
         self.client = cli.mqtt.mqtt_open(
@@ -199,6 +210,7 @@ class MqttQueue(Service):
         self._ha.start()
         self._ha.update_state(mqtt_connected=True)
         self._last_query = 0
+        self._connection_started_at = time.time()
         self._timelapse_start_prompt_window_until = (
             time.monotonic() + TIMELAPSE_START_PROMPT_BOOT_WINDOW_SEC
         )
@@ -820,14 +832,33 @@ class MqttQueue(Service):
         )
 
     def worker_run(self, timeout):
-        # Poll status every 10 seconds if idle
         now = time.time()
+
+        connection_age = now - getattr(self, "_connection_started_at", now)
+        last_activity = max(self._last_message_time, getattr(self, "_connection_started_at", 0))
+        silence = now - last_activity
+        if silence > MQTT_NO_RESPONSE_TIMEOUT_SEC:
+            count = getattr(self, "_silent_reconnect_count", 0) + 1
+            self._silent_reconnect_count = count
+            if count <= 3:
+                holdoff = 1.0
+            else:
+                holdoff = min(60.0 * (2 ** (count - 4)), 300.0)
+            log.warning(
+                "MQTT: No messages for %.0f s (connection age %.0f s, silent_count=%d) "
+                "— reconnecting in %.0f s",
+                silence, connection_age, count, holdoff,
+            )
+            raise ServiceRestartSignal("MQTT connection stuck: no messages received", delay=holdoff)
+
+        # Poll status every 10 seconds if idle
         if now - self._last_query > 10.0:
             self._send_status_query()
             self._last_query = now
 
         for msg, body in self.client.fetch(timeout=timeout):
             self._last_message_time = time.time()
+            self._silent_reconnect_count = 0
             log.debug(f"TOPIC [{msg.topic}]")
             log.debug(enhex(msg.payload[:]))
             if body and getattr(self, "_debug_log_payloads", False):
