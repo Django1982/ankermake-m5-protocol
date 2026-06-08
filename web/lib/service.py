@@ -1,10 +1,11 @@
 import atexit
 import logging as log
 import contextlib
+import threading
 import time
 
 from enum import Enum
-from threading import Thread, Event, current_thread
+from threading import Thread, Event, Lock, RLock, current_thread
 from datetime import datetime, timedelta
 import queue
 from queue import Queue
@@ -73,6 +74,14 @@ class Service(Thread):
         self._start_failure_count = 0
         self._start_failure_last_notice_at = 0.0
         self._start_failure_suppressed = False
+        # N-5: Event-based ready/stopped signalling — no polling loops
+        self._ready_event = Event()
+        self._stopped_event = Event()
+        self._stopped_event.set()   # starts in stopped state
+        # S-4: snapshot-based handler dispatch to avoid holding lock during callbacks
+        self._handlers_lock = Lock()
+        self._handlers_snapshot = ()
+        self._handlers_dirty = False
         self.daemon = True
         super().start()
 
@@ -192,10 +201,13 @@ class Service(Thread):
             else:
                 self._log_start_failure(E, retrying=False)
                 self.state = RunState.Stopped
+                self._stopped_event.set()
         else:
             self._reset_start_failure_tracking()
             log.info(f"{self.name}: Worker started")
             self.state = RunState.Running
+            self._ready_event.set()
+            self._stopped_event.clear()
 
     def _attempt_run(self):
         _t0 = time.monotonic()
@@ -226,6 +238,8 @@ class Service(Thread):
         else:
             log.info(f"{self.name}: Worker stopped")
             self.state = RunState.Stopped
+            self._ready_event.clear()
+            self._stopped_event.set()
 
     def run(self):
         self.worker_init()
@@ -264,6 +278,9 @@ class Service(Thread):
         log.debug(f"{self.name}: Shutting down thread")
         if self.state == RunState.Running:
             self.handlers.clear()
+            with self._handlers_lock:
+                self._handlers_snapshot = ()
+                self._handlers_dirty = False
             self.worker_stop()
         log.debug(f"{self.name}: Thread exit")
 
@@ -280,31 +297,47 @@ class Service(Thread):
         pass
 
     def notify(self, data):
-        for handler in list(self.handlers):
-            handler(data)
+        # S-4: Use a snapshot of handlers to avoid holding a lock during callbacks.
+        # Rebuild the snapshot only when the handler list has changed.
+        if self._handlers_dirty:
+            with self._handlers_lock:
+                self._handlers_snapshot = tuple(self.handlers)
+                self._handlers_dirty = False
+        for handler in self._handlers_snapshot:
+            try:
+                handler(data)
+            except Exception:
+                log.exception("handler error")
 
     @contextlib.contextmanager
     def tap(self, handler):
         self.handlers.append(handler)
+        with self._handlers_lock:
+            self._handlers_dirty = True
         try:
             yield self
         finally:
             try:
                 self.handlers.remove(handler)
+                with self._handlers_lock:
+                    self._handlers_dirty = True
             except ValueError:
                 pass
 
     def await_ready(self):
+        # N-5: Use Event.wait instead of polling loop
         while True:
             log.debug(f"{self.name}: Awaiting ready ({self.state})")
             if not (self.running and self.wanted):
                 raise ServiceStoppedError(f"{self.name}: Waiting for stopped thread")
 
-            if self.state == RunState.Running:
+            if self._ready_event.wait(timeout=0.4):
                 log.debug(f"{self.name}: Ready")
                 return True
 
-            self.idle(timeout=0.4)
+            if self.state == RunState.Running:
+                log.debug(f"{self.name}: Ready (state check)")
+                return True
 
     def await_stopped(self, timeout=None):
         deadline = None
@@ -316,10 +349,7 @@ class Service(Thread):
                 log.warning(f"{self.name}: Service started while waiting for it to stop")
                 return False
 
-            if self.state == RunState.Stopped:
-                log.debug(f"{self.name}: Stopped")
-                return True
-
+            # N-5: Use Event.wait for stopped state
             wait_timeout = 0.4
             if deadline is not None:
                 remaining = deadline - time.monotonic()
@@ -328,7 +358,13 @@ class Service(Thread):
                     return False
                 wait_timeout = min(wait_timeout, remaining)
 
-            self.idle(timeout=wait_timeout)
+            if self._stopped_event.wait(timeout=wait_timeout):
+                log.debug(f"{self.name}: Stopped")
+                return True
+
+            if self.state == RunState.Stopped:
+                log.debug(f"{self.name}: Stopped (state check)")
+                return True
 
 
 class ServiceManager:
@@ -337,6 +373,8 @@ class ServiceManager:
         self.svcs = {}
         self.refs = {}
         self.shutting_down = False
+        # S-3: RLock for nested borrow() calls (e.g. a service borrowing another)
+        self._lock = RLock()
         atexit.register(self.atexit)
 
     def __iter__(self):
@@ -470,8 +508,9 @@ class ServiceManager:
         except RuntimeError:
             pass
 
-        self.svcs[name] = svc
-        self.refs[name] = 0
+        with self._lock:
+            self.svcs[name] = svc
+            self.refs[name] = 0
 
     def restart_all(self, await_ready=True):
         wanted = {}
@@ -503,17 +542,23 @@ class ServiceManager:
         if name not in self:
             raise KeyError(f"Requested unknown service {name!r}")
 
-        svc = self.svcs[name]
-        self.refs[name] += 1
+        # S-3: Acquire lock to safely increment ref and decide whether to start.
+        # await_ready() must be called OUTSIDE the lock to avoid deadlocks when
+        # a service calls borrow() on another service during its own startup.
+        with self._lock:
+            svc = self.svcs[name]
+            self.refs[name] += 1
 
-        try:
             # Never request a fresh start while the old worker is still stopping.
             # Let it finish that transition first, then start cleanly.
-            if svc.state == RunState.Stopping:
-                svc.await_stopped()
+            stopping = svc.state == RunState.Stopping
 
+        if stopping:
+            svc.await_stopped()
+
+        with self._lock:
+            svc = self.svcs[name]
             should_start = False
-
             if self.refs[name] == 1:
                 should_start = True
             elif not svc.wanted and svc.state == RunState.Stopped:
@@ -524,8 +569,9 @@ class ServiceManager:
             if should_start:
                 svc.start()
 
+        try:
             if ready:
-                svc.await_ready()
+                svc.await_ready()   # OUTSIDE the lock
 
             return svc
 
@@ -537,16 +583,17 @@ class ServiceManager:
         if name not in self:
             raise KeyError(f"Requested unknown service {name!r}")
 
-        svc = self.svcs[name]
+        with self._lock:
+            svc = self.svcs[name]
 
-        assert self.refs[name]
+            assert self.refs[name]
 
-        self.refs[name] -= 1
+            self.refs[name] -= 1
 
-        if not self.refs[name]:
-            if getattr(svc, "persistent", False):
-                return
-            svc.stop()
+            if not self.refs[name]:
+                if getattr(svc, "persistent", False):
+                    return
+                svc.stop()
 
     @contextlib.contextmanager
     def borrow(self, name: str):
