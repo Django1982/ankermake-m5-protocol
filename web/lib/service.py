@@ -246,7 +246,12 @@ class Service(Thread):
 
         while self.running:
             if self.state == RunState.Starting:
-                if self._holdoff.passed:
+                if not self.wanted:
+                    # stop() called during retry holdoff — don't wait, go directly to Stopped
+                    self.state = RunState.Stopped
+                    self._ready_event.clear()
+                    self._stopped_event.set()
+                elif self._holdoff.passed:
                     self._attempt_start()
                 else:
                     self.idle(timeout=0.1)
@@ -270,6 +275,7 @@ class Service(Thread):
                     log.debug(f"{self.name}: Starting worker")
                     self._holdoff.reset()
                     self.state = RunState.Starting
+                    self._stopped_event.clear()  # service is no longer stopped once it starts trying
                 else:
                     self.idle(timeout=0.1)
             else:

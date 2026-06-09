@@ -62,7 +62,7 @@ class TestServiceCrashRecovery:
             def worker_run(self, timeout):
                 self.restart_count += 1
                 if self.restart_count == 1:
-                    raise ServiceRestartSignal("Intentional restart")
+                    raise ServiceRestartSignal("Intentional restart", delay=0)
                 time.sleep(0.01)
 
         service = RestartingService()
