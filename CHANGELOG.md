@@ -67,9 +67,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.10.10] - 2026-06-09
+
 ### Fixed
  - PPPP sockets now bind to fixed local UDP port `32108` (`PPPP_LAN_PORT`) before the first `sendto`, so that printer replies are delivered to a predictable port. This makes `ankerctl` work behind a stateful firewall (e.g. ufw with default-deny-incoming) where ephemeral local ports were silently dropping the printer's `PunchPkt` and discovery replies. A single ufw rule (`sudo ufw allow in proto udp to any port 32108`) now suffices for LAN mode. WAN/cloud sessions remain ephemeral. (issue [#77](https://github.com/Django1982/ankermake-m5-protocol/issues/77); see [`documentation/issue77_code_fix.md`](documentation/issue77_code_fix.md) for the full design)
  - `_configure_udp_socket()` gained an optional `local_port` parameter with an `EADDRINUSE` guard that raises a clear `RuntimeError` when a second `ankerctl` instance holds port `32108`.
+ - H.264 video stream stalled after 5-15 seconds when using the web UI camera feed. Root cause: a 10 ms per-iteration floor added to the service framework in 1.10.8 capped PPPPService at 100 DRW ACK/s — well below what 720p streaming requires (~150-200/s), causing the printer's send window to fill and video to freeze. PPPPService now opts out of the floor via `_min_iteration_sec = 0.0` and drains all buffered UDP packets per iteration (up to 4096) to match pre-1.10.8 ACK throughput. ([#89](https://github.com/Django1982/ankermake-m5-protocol/pull/89))
+ - MQTT back-off counter was reset on each reconnect instead of persisting across reconnect cycles, causing the back-off to never advance past the first step when the printer stayed offline for extended periods. ([#85](https://github.com/Django1982/ankermake-m5-protocol/pull/85))
+ - Reconnect button now appears in the web UI after 90 seconds of MQTT silence; uses `fetch()` instead of the removed `$.post` dependency.
 
 ## [1.10.9] - 2026-05-02
 
