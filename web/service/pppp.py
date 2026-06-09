@@ -53,7 +53,14 @@ class PPPPService(Service):
         self.xzyh_handlers = []
         self._handler_lock = threading.Lock()
         self._log_repeat_state = {}
+        self._connected_event = threading.Event()
         super().__init__()
+
+    def await_connected(self, timeout: float = 10.0) -> bool:
+        """Block until the PPPP connection is established or *timeout* seconds elapse."""
+        if self.connected:
+            return True
+        return self._connected_event.wait(timeout)
 
     @property
     def name(self):
@@ -220,6 +227,7 @@ class PPPPService(Service):
             elapsed,
         )
         self._api = api
+        self._connected_event.set()
 
     def _drain_xzyh(self, chan):
         api = getattr(self, "_api", None)
@@ -362,6 +370,7 @@ class PPPPService(Service):
             self._drain_xzyh(chan=msg.chan)
 
     def worker_stop(self):
+        self._connected_event.clear()
         self._force_close_api()
 
     @property

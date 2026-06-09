@@ -365,14 +365,22 @@ def _video_has_recent_frame(vq, wait_sec=SNAPSHOT_FRAME_WAIT_SEC, max_age_sec=SN
     if not hasattr(vq, "last_frame_at"):
         return True
 
+    last_frame_at = getattr(vq, "last_frame_at", None)
+    if last_frame_at is not None and time.monotonic() - last_frame_at <= max_age_sec:
+        return True
+
+    if hasattr(vq, "await_recent_frame"):
+        vq.await_recent_frame(timeout=wait_sec)
+        last_frame_at = getattr(vq, "last_frame_at", None)
+        return last_frame_at is not None and time.monotonic() - last_frame_at <= max_age_sec
+
     deadline = time.monotonic() + wait_sec
-    while True:
+    while time.monotonic() < deadline:
         last_frame_at = getattr(vq, "last_frame_at", None)
         if last_frame_at is not None and time.monotonic() - last_frame_at <= max_age_sec:
             return True
-        if time.monotonic() >= deadline:
-            return False
         time.sleep(0.1)
+    return False
 
 
 def _active_printer(cfg=None, printer_index=None):
@@ -820,6 +828,10 @@ def _send_pppp_light_state(pppp, light):
 
 
 def _await_pppp_connected(pppp, timeout=8.0):
+    if getattr(pppp, "connected", False):
+        return True
+    if hasattr(pppp, "await_connected"):
+        return pppp.await_connected(timeout=max(0.1, float(timeout)))
     deadline = time.monotonic() + max(0.1, float(timeout))
     while time.monotonic() < deadline:
         if getattr(pppp, "connected", False):

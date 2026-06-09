@@ -79,7 +79,13 @@ class VideoQueue(Service):
         self._manual_recovery_reason = None
         self._manual_recovery_force_pppp = False
         self._manual_recovery_requested_at = 0.0
+        self._frame_event = threading.Event()
         super().__init__()
+
+    def await_recent_frame(self, timeout: float = 3.0) -> bool:
+        """Block until a new video frame arrives or *timeout* seconds elapse."""
+        self._frame_event.clear()
+        return self._frame_event.wait(timeout)
 
     @property
     def name(self):
@@ -260,6 +266,7 @@ class VideoQueue(Service):
             return
 
         self.last_frame_at = time.monotonic()
+        self._frame_event.set()
         self._live_active = True
         self._stall_retry_count = 0
         self.notify(msg)
