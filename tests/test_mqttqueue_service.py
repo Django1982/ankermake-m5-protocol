@@ -114,7 +114,11 @@ def test_forward_to_ha_tracks_filament_state_from_material_change_mode():
     ha_updates, history_calls, timelapse_calls, events = [], [], [], []
     queue = _queue()
 
-    queue._forward_to_ha({"commandType": 1023, "value": 0, "progress": 0, "stepLen": 0})
+    # _update_filament_state is called only from _handle_notification (under
+    # _state_lock), not from _forward_to_ha, so the state update is visible
+    # only after _handle_notification runs.
+    with queue._state_lock:
+        queue._handle_notification({"commandType": 1023, "value": 0, "progress": 0, "stepLen": 0})
     state = queue.get_state()["filament"]
 
     assert state["state"] == "loaded"

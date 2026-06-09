@@ -266,7 +266,8 @@ class VideoQueue(Service):
             return
 
         self.last_frame_at = time.monotonic()
-        self._frame_event.set()
+        if hasattr(self, "_frame_event"):
+            self._frame_event.set()
         self._live_active = True
         self._stall_retry_count = 0
         self.notify(msg)

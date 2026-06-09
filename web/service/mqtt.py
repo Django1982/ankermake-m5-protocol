@@ -109,6 +109,7 @@ class MqttQueue(Service):
         super().__init__()
         self.persistent = True
         self._state_lock = threading.RLock()
+        self._print_state_event = threading.Event()
 
     @property
     def name(self):
@@ -174,7 +175,6 @@ class MqttQueue(Service):
         self._filament_runout_pending = False
         self._filament_runout_pending_at = 0.0
         self._stored_file_selection_cond = threading.Condition(self._state_lock)
-        self._print_state_event = threading.Event()
         self._stored_file_preview_request_lock = threading.Lock()
         self._stored_file_preview_cache = {}
         self._stored_file_preview_seq = 0
@@ -248,6 +248,8 @@ class MqttQueue(Service):
         # Preserve debug setting across resets if possible, but init here if missing
         if not hasattr(self, "_debug_log_payloads"):
              self._debug_log_payloads = False
+        if not hasattr(self, "_print_state_event"):
+            self._print_state_event = threading.Event()
 
     def _record_failure(self, payload, progress, reason):
         """Record a print failure: history, timelapse, HA state, and notification event."""
