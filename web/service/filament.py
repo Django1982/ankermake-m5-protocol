@@ -1,27 +1,28 @@
 """Filament profile store backed by SQLite."""
 
+import contextlib
 import os
 import re
 import sqlite3
 import threading
 import logging
-from contextlib import contextmanager
 
 log = logging.getLogger(__name__)
 
 # Fields that are displayed in the UI and must be sanitized against XSS
 _TEXT_FIELDS = {"name", "brand", "notes", "material", "color", "seam_position"}
 
+# M-1 equivalent: precompile XSS-strip regex at module load time.
+_SANITIZE_RE = re.compile(r'<[^>]{0,1000}>')
+
+# Schema version — bump when adding columns or new indexes.
+_CURRENT_SCHEMA_VERSION = 1
+
 
 def _sanitize_text(value):
-    """Strip HTML tags from a string value to prevent stored XSS.
-
-    Uses a simple regex sufficient for tag removal without introducing new
-    dependencies. Returns the original value unchanged for non-string types
-    so numeric fields are unaffected.
-    """
+    """Strip HTML tags from a string value to prevent stored XSS."""
     if isinstance(value, str):
-        return re.sub(r'<[^>]{0,1000}>', '', value)
+        return _SANITIZE_RE.sub('', value)
     return value
 
 
@@ -270,29 +271,56 @@ class FilamentStore:
 
     def __init__(self, db_path):
         self.db_path = db_path
-        self._lock = threading.Lock()
+        self._lock = threading.RLock()
+        self._conn = None
         self._init_db()
 
-    def _connect(self):
-        conn = sqlite3.connect(self.db_path, check_same_thread=False)
+    def _open_connection(self):
+        conn = sqlite3.connect(
+            str(self.db_path),
+            check_same_thread=False,
+            timeout=10,
+        )
         conn.row_factory = sqlite3.Row
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("PRAGMA synchronous=NORMAL")
+        conn.execute("PRAGMA foreign_keys=ON")
+        conn.commit()
         return conn
 
-    @contextmanager
-    def _connection(self):
-        conn = self._connect()
+    @contextlib.contextmanager
+    def _connect(self):
+        """Yield the persistent connection; auto-commits on clean exit, rolls back on exception."""
+        conn = self._conn
         try:
             yield conn
-        finally:
-            if os.fspath(self.db_path) != ":memory:":
-                conn.close()
+            conn.commit()
+        except BaseException:
+            conn.rollback()
+            raise
+
+    def close(self):
+        """Close the persistent connection. Call from worker_stop / teardown."""
+        with self._lock:
+            if self._conn is not None:
+                try:
+                    self._conn.close()
+                except Exception:
+                    pass
+                self._conn = None
 
     def _recreate_db_after_corruption(self, exc):
         db_path = os.fspath(self.db_path)
         if db_path == ":memory:":
-            raise
+            raise exc
         log.warning("Filament store: database corruption detected at %s: %s. Recreating database.", db_path, exc)
         try:
+            if self._conn is not None:
+                try:
+                    self._conn.close()
+                except Exception:
+                    pass
+                self._conn = None
             os.unlink(db_path)
         except FileNotFoundError:
             pass
@@ -300,67 +328,77 @@ class FilamentStore:
     def _init_db(self):
         with self._lock:
             try:
-                with self._connection() as conn:
-                    conn.executescript(_SCHEMA)
-                    self._migrate(conn)
-                    count = conn.execute("SELECT COUNT(*) FROM filaments").fetchone()[0]
-                    if count == 0:
-                        self._seed_defaults(conn)
-                    conn.commit()
+                self._conn = self._open_connection()
+                self._conn.executescript(_SCHEMA)
+                self._migrate_schema(self._conn)
+                count = self._conn.execute("SELECT COUNT(*) FROM filaments").fetchone()[0]
+                if count == 0:
+                    self._seed_defaults(self._conn)
+                self._conn.commit()
             except sqlite3.DatabaseError as exc:
                 self._recreate_db_after_corruption(exc)
-                with self._connection() as conn:
-                    conn.executescript(_SCHEMA)
-                    self._migrate(conn)
-                    count = conn.execute("SELECT COUNT(*) FROM filaments").fetchone()[0]
-                    if count == 0:
-                        self._seed_defaults(conn)
-                    conn.commit()
+                self._conn = self._open_connection()
+                self._conn.executescript(_SCHEMA)
+                self._migrate_schema(self._conn)
+                count = self._conn.execute("SELECT COUNT(*) FROM filaments").fetchone()[0]
+                if count == 0:
+                    self._seed_defaults(self._conn)
+                self._conn.commit()
 
-    def _migrate(self, conn):
-        """Apply incremental schema migrations for existing databases.
+    def _migrate_schema(self, conn):
+        """Apply incremental schema migrations using PRAGMA user_version as the version counter.
 
         Handles:
         - Rename nozzle_temp -> nozzle_temp_other_layer (SQLite 3.25+)
         - Rename bed_temp -> bed_temp_other_layer (SQLite 3.25+)
         - ADD COLUMN for each new column that may not exist yet
         """
-        # Rename legacy columns if they exist (SQLite >= 3.25.0)
-        _renames = [
-            ("nozzle_temp", "nozzle_temp_other_layer"),
-            ("bed_temp",    "bed_temp_other_layer"),
-        ]
-        for old_col, new_col in _renames:
-            try:
-                conn.execute(
-                    f"ALTER TABLE filaments RENAME COLUMN {old_col} TO {new_col}"
-                )
-                log.info("Filament store: renamed column %s -> %s", old_col, new_col)
-            except sqlite3.OperationalError:
-                # Column doesn't exist (already renamed) or SQLite too old — skip
-                pass
-            except Exception as exc:
-                log.warning(
-                    "Filament store: could not rename column %s -> %s: %s",
-                    old_col,
-                    new_col,
-                    exc,
-                )
+        try:
+            version = conn.execute("PRAGMA user_version").fetchone()[0]
+            if version >= _CURRENT_SCHEMA_VERSION:
+                return
 
-        # Add any missing new columns
-        existing = {
-            row[1]
-            for row in conn.execute("PRAGMA table_info(filaments)").fetchall()
-        }
-        for col_name, col_def in _MIGRATION_COLUMNS:
-            if col_name not in existing:
+            # Version 0 → 1: rename legacy columns and add new ones.
+            # Rename legacy columns if they exist (SQLite >= 3.25.0)
+            _renames = [
+                ("nozzle_temp", "nozzle_temp_other_layer"),
+                ("bed_temp",    "bed_temp_other_layer"),
+            ]
+            for old_col, new_col in _renames:
                 try:
                     conn.execute(
-                        f"ALTER TABLE filaments ADD COLUMN {col_name} {col_def}"
+                        f"ALTER TABLE filaments RENAME COLUMN {old_col} TO {new_col}"
                     )
-                    log.info("Filament store: added column %s", col_name)
+                    log.info("Filament store: renamed column %s -> %s", old_col, new_col)
+                except sqlite3.OperationalError:
+                    # Column doesn't exist (already renamed) or SQLite too old — skip
+                    pass
                 except Exception as exc:
-                    log.warning("Filament store: could not add column %s: %s", col_name, exc)
+                    log.warning(
+                        "Filament store: could not rename column %s -> %s: %s",
+                        old_col,
+                        new_col,
+                        exc,
+                    )
+
+            # Add any missing new columns
+            existing = {
+                row[1]
+                for row in conn.execute("PRAGMA table_info(filaments)").fetchall()
+            }
+            for col_name, col_def in _MIGRATION_COLUMNS:
+                if col_name not in existing:
+                    try:
+                        conn.execute(
+                            f"ALTER TABLE filaments ADD COLUMN {col_name} {col_def}"
+                        )
+                        log.info("Filament store: added column %s", col_name)
+                    except Exception as exc:
+                        log.warning("Filament store: could not add column %s: %s", col_name, exc)
+
+            conn.execute(f"PRAGMA user_version = {_CURRENT_SCHEMA_VERSION}")
+        except Exception as e:
+            log.warning("Filament store: schema migration failed: %s", e)
 
     def _seed_defaults(self, conn):
         for profile in _DEFAULTS:
@@ -375,7 +413,7 @@ class FilamentStore:
     def list_all(self):
         """Return all filament profiles as list of dicts, ordered by id."""
         with self._lock:
-            with self._connection() as conn:
+            with self._connect() as conn:
                 rows = conn.execute(
                     "SELECT * FROM filaments ORDER BY id ASC"
                 ).fetchall()
@@ -384,7 +422,7 @@ class FilamentStore:
     def get(self, profile_id):
         """Return a single profile dict or None."""
         with self._lock:
-            with self._connection() as conn:
+            with self._connect() as conn:
                 row = conn.execute(
                     "SELECT * FROM filaments WHERE id = ?", (profile_id,)
                 ).fetchone()
@@ -393,7 +431,6 @@ class FilamentStore:
     def create(self, data):
         """Insert a new profile. Returns the new profile dict."""
         safe = {k: data[k] for k in _FIELDS if k in data}
-        # Sanitize text fields to prevent stored XSS
         for field in _TEXT_FIELDS:
             if field in safe:
                 safe[field] = _sanitize_text(safe[field])
@@ -401,12 +438,17 @@ class FilamentStore:
         cols = ", ".join(safe.keys())
         placeholders = ", ".join("?" for _ in safe)
         with self._lock:
-            with self._connection() as conn:
+            with self._connect() as conn:
+                if sqlite3.sqlite_version_info >= (3, 35, 0):
+                    row = conn.execute(
+                        f"INSERT INTO filaments ({cols}) VALUES ({placeholders}) RETURNING *",
+                        list(safe.values()),
+                    ).fetchone()
+                    return dict(row)
                 cur = conn.execute(
                     f"INSERT INTO filaments ({cols}) VALUES ({placeholders})",
                     list(safe.values()),
                 )
-                conn.commit()
                 row = conn.execute(
                     "SELECT * FROM filaments WHERE id = ?", (cur.lastrowid,)
                 ).fetchone()
@@ -415,7 +457,6 @@ class FilamentStore:
     def update(self, profile_id, data):
         """Update an existing profile. Returns the updated profile dict or None."""
         safe = {k: data[k] for k in _FIELDS if k in data}
-        # Sanitize text fields to prevent stored XSS
         for field in _TEXT_FIELDS:
             if field in safe:
                 safe[field] = _sanitize_text(safe[field])
@@ -425,12 +466,17 @@ class FilamentStore:
             return self.get(profile_id)
         assignments = ", ".join(f"{k} = ?" for k in safe)
         with self._lock:
-            with self._connection() as conn:
+            with self._connect() as conn:
+                if sqlite3.sqlite_version_info >= (3, 35, 0):
+                    row = conn.execute(
+                        f"UPDATE filaments SET {assignments} WHERE id = ? RETURNING *",
+                        list(safe.values()) + [profile_id],
+                    ).fetchone()
+                    return dict(row) if row else None
                 conn.execute(
                     f"UPDATE filaments SET {assignments} WHERE id = ?",
                     list(safe.values()) + [profile_id],
                 )
-                conn.commit()
                 row = conn.execute(
                     "SELECT * FROM filaments WHERE id = ?", (profile_id,)
                 ).fetchone()
@@ -439,11 +485,10 @@ class FilamentStore:
     def delete(self, profile_id):
         """Delete a profile. Returns True if deleted, False if not found."""
         with self._lock:
-            with self._connection() as conn:
+            with self._connect() as conn:
                 cur = conn.execute(
                     "DELETE FROM filaments WHERE id = ?", (profile_id,)
                 )
-                conn.commit()
                 return cur.rowcount > 0
 
     def duplicate(self, profile_id):
