@@ -40,7 +40,7 @@ $(function () {
     } else {
         /* Clipboard support missing: remove clipboard icons to minimize confusion */
         $("[data-clipboard-src]").remove();
-    };
+    }
 
     /**
      * Initializes bootstrap alerts and sets a timeout for when they should automatically close
@@ -58,7 +58,7 @@ $(function () {
      * @returns {number} temperature in °C, null if temp is not a number
      */
     function getTemp(temp) {
-        return (typeof(temp) === "number") ? (temp / 100) : null;
+        return typeof temp === "number" ? temp / 100 : null;
     }
 
     /**
@@ -67,7 +67,7 @@ $(function () {
      * @returns {number} Rounded temperature in °C, null if temp is not a number
      */
     function getTempRounded(temp) {
-        return (typeof(temp) === "number") ? Math.round(temp / 100) : null;
+        return typeof temp === "number" ? Math.round(temp / 100) : null;
     }
 
     function formatServiceTempValue(temp) {
@@ -90,10 +90,10 @@ $(function () {
      * @returns {number|null} Whole seconds, or null when the input is not usable
      */
     function normalizeTimeSeconds(value) {
-        if (typeof(value) === "number") {
+        if (typeof value === "number") {
             return Number.isFinite(value) && value >= 0 ? Math.floor(value) : null;
         }
-        if (typeof(value) === "string") {
+        if (typeof value === "string") {
             const trimmed = value.trim();
             if (!trimmed) {
                 return null;
@@ -248,7 +248,7 @@ $(function () {
     }
 
     function getHomeConsoleVisibleEntries() {
-        return _homeConsoleEntries.filter(entry => {
+        return _homeConsoleEntries.filter((entry) => {
             if (!entry || typeof entry.id !== "number" || entry.id <= _homeConsoleClearedBeforeId) {
                 return false;
             }
@@ -272,32 +272,42 @@ $(function () {
             return text.includes("pppp");
         }
         if (filter === "video") {
-            return text.includes("video")
-                || text.includes("/ws/video")
-                || text.includes("snapshot")
-                || text.includes("jmuxer");
+            return (
+                text.includes("video") ||
+                text.includes("/ws/video") ||
+                text.includes("snapshot") ||
+                text.includes("jmuxer")
+            );
         }
         if (filter === "upload") {
-            return text.includes("upload")
-                || text.includes("filetransfer")
-                || text.includes("transfer")
-                || text.includes("gcode file");
+            return (
+                text.includes("upload") ||
+                text.includes("filetransfer") ||
+                text.includes("transfer") ||
+                text.includes("gcode file")
+            );
         }
         if (filter === "error") {
-            return /^\[(e|w|!)\]/i.test(text)
-                || text.includes("error")
-                || text.includes("exception")
-                || text.includes("traceback");
+            return (
+                /^\[(e|w|!)\]/i.test(text) ||
+                text.includes("error") ||
+                text.includes("exception") ||
+                text.includes("traceback")
+            );
         }
         return true;
     }
 
     function updateHomeConsoleStatus() {
         const visibleEntries = getHomeConsoleVisibleEntries();
-        const totalEntries = _homeConsoleEntries.filter(entry => entry && entry.id > _homeConsoleClearedBeforeId).length;
+        const totalEntries = _homeConsoleEntries.filter(
+            (entry) => entry && entry.id > _homeConsoleClearedBeforeId,
+        ).length;
         const filterLabel = _homeConsoleFilter.toUpperCase();
         const scrollLabel = _homeConsoleAutoScrollPaused ? "auto-scroll paused" : "auto-scroll live";
-        setHomeConsoleStatus(`Showing ${visibleEntries.length} of ${totalEntries} line(s) - ${filterLabel} - ${scrollLabel}`);
+        setHomeConsoleStatus(
+            `Showing ${visibleEntries.length} of ${totalEntries} line(s) - ${filterLabel} - ${scrollLabel}`,
+        );
     }
 
     function updateHomeConsoleFilterButtons() {
@@ -331,7 +341,9 @@ $(function () {
         }
 
         if (_homeConsoleClearedBeforeId > 0) {
-            _homeConsoleEntries = _homeConsoleEntries.filter(entry => entry && entry.id > _homeConsoleClearedBeforeId);
+            _homeConsoleEntries = _homeConsoleEntries.filter(
+                (entry) => entry && entry.id > _homeConsoleClearedBeforeId,
+            );
         }
     }
 
@@ -342,11 +354,12 @@ $(function () {
             return;
         }
 
-        const wasNearBottom = !pre
-            || (pre.scrollHeight - pre.scrollTop - pre.clientHeight) < 40;
+        const wasNearBottom = !pre || pre.scrollHeight - pre.scrollTop - pre.clientHeight < 40;
 
         const visibleEntries = getHomeConsoleVisibleEntries();
-        const totalEntries = _homeConsoleEntries.filter(entry => entry && entry.id > _homeConsoleClearedBeforeId).length;
+        const totalEntries = _homeConsoleEntries.filter(
+            (entry) => entry && entry.id > _homeConsoleClearedBeforeId,
+        ).length;
 
         if (!visibleEntries.length) {
             if (_homeConsoleWasCleared && totalEntries === 0) {
@@ -358,7 +371,7 @@ $(function () {
             }
         } else {
             content.innerHTML = visibleEntries
-                .map(entry => escapeHtml(entry && entry.text ? entry.text : ""))
+                .map((entry) => escapeHtml(entry && entry.text ? entry.text : ""))
                 .join("\n");
         }
 
@@ -445,7 +458,7 @@ $(function () {
     $(document).on("click", "#home-console-clear", function () {
         _homeConsoleClearedBeforeId = _homeConsoleLastId;
         _homeConsoleWasCleared = true;
-        _homeConsoleEntries = _homeConsoleEntries.filter(entry => entry && entry.id > _homeConsoleClearedBeforeId);
+        _homeConsoleEntries = _homeConsoleEntries.filter((entry) => entry && entry.id > _homeConsoleClearedBeforeId);
         renderHomeConsoleEntries();
     });
 
@@ -508,9 +521,7 @@ $(function () {
         if (data.commandType === 1085 && String(data.errorCode || "") === "0xFF01030001") {
             return true;
         }
-        return data.commandType === 1000
-            && Number(data.subType) === 2
-            && Number(data.value) === 6;
+        return data.commandType === 1000 && Number(data.subType) === 2 && Number(data.value) === 6;
     }
 
     const _filamentStatus = {
@@ -587,10 +598,11 @@ $(function () {
 
     function renderFilamentStatus() {
         const pausedForFilament = _currentPrintState === PRINT_STATE.PAUSED && !!_filamentStatus.pauseReason;
-        const unverifiedFilamentState = _currentPrintState !== PRINT_STATE.PRINTING
-            && _currentPrintState !== PRINT_STATE.PAUSED
-            && _filamentStatus.label === "Loaded"
-            && !_filamentStatus.issue;
+        const unverifiedFilamentState =
+            _currentPrintState !== PRINT_STATE.PRINTING &&
+            _currentPrintState !== PRINT_STATE.PAUSED &&
+            _filamentStatus.label === "Loaded" &&
+            !_filamentStatus.issue;
         let label = _filamentStatus.label || "Unknown";
         let detail = _filamentStatus.detail || null;
         let detailTone = "muted";
@@ -654,10 +666,11 @@ $(function () {
             return;
         }
 
-        const printActive = _currentPrintState === PRINT_STATE.CALIBRATING
-            || _currentPrintState === PRINT_STATE.PENDING_START
-            || _currentPrintState === PRINT_STATE.PRINTING
-            || _currentPrintState === PRINT_STATE.PAUSED;
+        const printActive =
+            _currentPrintState === PRINT_STATE.CALIBRATING ||
+            _currentPrintState === PRINT_STATE.PENDING_START ||
+            _currentPrintState === PRINT_STATE.PRINTING ||
+            _currentPrintState === PRINT_STATE.PAUSED;
         const canStart = printActive && !_timelapseRuntime.capturing;
         const canPause = _timelapseRuntime.capturing && !_timelapseRuntime.paused;
         const canResume = _timelapseRuntime.capturing && _timelapseRuntime.manualPaused;
@@ -670,13 +683,15 @@ $(function () {
 
         let message = "Use these controls to start, pause, resume, or stop timelapse capture for the active print.";
         if (_timelapseRuntime.promptStart && !_timelapseRuntime.capturing) {
-            message = "An active print is waiting for timelapse confirmation. Use Start or the action card to begin capture.";
+            message =
+                "An active print is waiting for timelapse confirmation. Use Start or the action card to begin capture.";
         } else if (_timelapseRuntime.recovering) {
             message = "Timelapse is recovering the camera stream.";
         } else if (_timelapseRuntime.capturing && _timelapseRuntime.paused) {
-            message = _timelapseRuntime.pauseReason === "manual"
-                ? "Timelapse is paused manually."
-                : `Timelapse is paused: ${_timelapseRuntime.detail || "capture is waiting to resume."}`;
+            message =
+                _timelapseRuntime.pauseReason === "manual"
+                    ? "Timelapse is paused manually."
+                    : `Timelapse is paused: ${_timelapseRuntime.detail || "capture is waiting to resume."}`;
         } else if (_timelapseRuntime.capturing) {
             message = "Timelapse capture is running for the active print.";
         } else if (_timelapseRuntime.activeCapture) {
@@ -706,9 +721,7 @@ $(function () {
         const fileName = String(_timelapseRuntime.promptFilename || "this print").trim() || "this print";
         const frameCount = Number(_timelapseRuntime.resumeFrameCount || 0);
         const canResume = !!_timelapseRuntime.resumeAvailable && frameCount > 0;
-        title.textContent = canResume
-            ? "Resume timelapse for active print"
-            : "Start timelapse for active print";
+        title.textContent = canResume ? "Resume timelapse for active print" : "Start timelapse for active print";
         detail.textContent = canResume
             ? `${fileName} already has ${frameCount} saved frame${frameCount === 1 ? "" : "s"}. Continue or dismiss this pending capture.`
             : `${fileName} is already printing. Continue or dismiss timelapse capture for this print.`;
@@ -756,7 +769,9 @@ $(function () {
             detail = detail ? `${detail} ${previewDetail}` : previewDetail;
         }
         if (_cameraState.effectiveSource === "printer" && typeof videoEnabled !== "undefined" && !videoEnabled) {
-            detail = detail ? `${detail} Enable printer video to start live view.` : "Enable printer video to start live view.";
+            detail = detail
+                ? `${detail} Enable printer video to start live view.`
+                : "Enable printer video to start live view.";
         }
 
         const status = $("#camera-source-status");
@@ -856,13 +871,9 @@ $(function () {
             return;
         }
         if (_externalCameraPreviewEnabled) {
-            buttons
-                .html('<i class="bi bi-camera-video-off"></i> Disable Preview')
-                .attr("aria-pressed", "true");
+            buttons.html('<i class="bi bi-camera-video-off"></i> Disable Preview').attr("aria-pressed", "true");
         } else {
-            buttons
-                .html('<i class="bi bi-camera-video"></i> Enable Preview')
-                .attr("aria-pressed", "false");
+            buttons.html('<i class="bi bi-camera-video"></i> Enable Preview').attr("aria-pressed", "false");
         }
     }
 
@@ -874,66 +885,73 @@ $(function () {
         if (_externalCameraPreviewTimer) {
             clearTimeout(_externalCameraPreviewTimer);
         }
-        _externalCameraPreviewTimer = setTimeout(function () {
-            const img = document.getElementById("external-camera-preview");
-            if (!img || _cameraState.effectiveSource !== "external") {
-                return;
-            }
-            const token = _externalCameraPreviewToken;
-            const refreshMs = Math.max(1000, Math.round(_cameraState.externalRefreshSec * 1000));
-            const startedAt = Date.now();
-            const scheduleNext = function () {
-                const elapsedMs = Date.now() - startedAt;
-                scheduleExternalCameraPreview(Math.max(0, refreshMs - elapsedMs));
-            };
-            fetch(`/api/camera/frame?printer_index=${encodeURIComponent(getActivePrinterIndex())}&ts=${Date.now()}`, {
-                cache: "no-store",
-            })
-                .then(async (resp) => {
-                    if (!resp.ok) {
-                        const data = await resp.json().catch(() => ({}));
-                        throw new Error(data.error || `External camera preview failed (HTTP ${resp.status})`);
-                    }
-                    return resp.blob();
-                })
-                .then((blob) => {
-                    if (token !== _externalCameraPreviewToken) {
-                        return;
-                    }
-                    const nextUrl = URL.createObjectURL(blob);
-                    img.onload = function () {
+        _externalCameraPreviewTimer = setTimeout(
+            function () {
+                const img = document.getElementById("external-camera-preview");
+                if (!img || _cameraState.effectiveSource !== "external") {
+                    return;
+                }
+                const token = _externalCameraPreviewToken;
+                const refreshMs = Math.max(1000, Math.round(_cameraState.externalRefreshSec * 1000));
+                const startedAt = Date.now();
+                const scheduleNext = function () {
+                    const elapsedMs = Date.now() - startedAt;
+                    scheduleExternalCameraPreview(Math.max(0, refreshMs - elapsedMs));
+                };
+                fetch(
+                    `/api/camera/frame?printer_index=${encodeURIComponent(getActivePrinterIndex())}&ts=${Date.now()}`,
+                    {
+                        cache: "no-store",
+                    },
+                )
+                    .then(async (resp) => {
+                        if (!resp.ok) {
+                            const data = await resp.json().catch(() => ({}));
+                            throw new Error(data.error || `External camera preview failed (HTTP ${resp.status})`);
+                        }
+                        return resp.blob();
+                    })
+                    .then((blob) => {
                         if (token !== _externalCameraPreviewToken) {
+                            return;
+                        }
+                        const nextUrl = URL.createObjectURL(blob);
+                        img.onload = function () {
+                            if (token !== _externalCameraPreviewToken) {
+                                URL.revokeObjectURL(nextUrl);
+                                return;
+                            }
+                            if (_externalCameraPreviewObjectUrl) {
+                                URL.revokeObjectURL(_externalCameraPreviewObjectUrl);
+                            }
+                            _externalCameraPreviewObjectUrl = nextUrl;
+                            _cameraState.previewError = null;
+                            renderCameraStatusText();
+                            scheduleNext();
+                        };
+                        img.onerror = function () {
                             URL.revokeObjectURL(nextUrl);
-                            return;
-                        }
-                        if (_externalCameraPreviewObjectUrl) {
-                            URL.revokeObjectURL(_externalCameraPreviewObjectUrl);
-                        }
-                        _externalCameraPreviewObjectUrl = nextUrl;
-                        _cameraState.previewError = null;
-                        renderCameraStatusText();
-                        scheduleNext();
-                    };
-                    img.onerror = function () {
-                        URL.revokeObjectURL(nextUrl);
+                            if (token !== _externalCameraPreviewToken) {
+                                return;
+                            }
+                            _cameraState.previewError =
+                                "The external camera returned a frame that could not be displayed.";
+                            renderCameraStatusText();
+                            scheduleNext();
+                        };
+                        img.src = nextUrl;
+                    })
+                    .catch((err) => {
                         if (token !== _externalCameraPreviewToken) {
                             return;
                         }
-                        _cameraState.previewError = "The external camera returned a frame that could not be displayed.";
+                        _cameraState.previewError = err && err.message ? err.message : String(err);
                         renderCameraStatusText();
                         scheduleNext();
-                    };
-                    img.src = nextUrl;
-                })
-                .catch((err) => {
-                    if (token !== _externalCameraPreviewToken) {
-                        return;
-                    }
-                    _cameraState.previewError = err && err.message ? err.message : String(err);
-                    renderCameraStatusText();
-                    scheduleNext();
-                });
-        }, Math.max(0, delayMs || 0));
+                    });
+            },
+            Math.max(0, delayMs || 0),
+        );
     }
 
     function startExternalCameraStreamPreview() {
@@ -1174,10 +1192,10 @@ $(function () {
             console.warn("Failed to poll printer alerts", err);
         });
         window._intervalRegistry = window._intervalRegistry || {};
-        if (window._intervalRegistry['printerAlertPoll']) {
-            clearInterval(window._intervalRegistry['printerAlertPoll']);
+        if (window._intervalRegistry["printerAlertPoll"]) {
+            clearInterval(window._intervalRegistry["printerAlertPoll"]);
         }
-        window._intervalRegistry['printerAlertPoll'] = setInterval(function () {
+        window._intervalRegistry["printerAlertPoll"] = setInterval(function () {
             pollPrinterAlerts().catch(function (err) {
                 console.warn("Failed to poll printer alerts", err);
             });
@@ -1247,8 +1265,7 @@ $(function () {
 
         _open() {
             setConnectionBadge(this.badge, "warning");
-            if (this.open)
-                this.open(this.ws);
+            if (this.open) this.open(this.ws);
         }
 
         _close() {
@@ -1260,8 +1277,7 @@ $(function () {
             if (this.autoReconnect) {
                 setTimeout(() => this.connect(), this.reconnect);
             }
-            if (this.close)
-                this.close(old);
+            if (this.close) this.close(old);
         }
 
         _error() {
@@ -1274,8 +1290,7 @@ $(function () {
                     old.close();
                 }
             } catch (_) {}
-            if (this.error)
-                this.error(old);
+            if (this.error) this.error(old);
         }
 
         _message(event) {
@@ -1296,11 +1311,9 @@ $(function () {
             if (!this.is_open) {
                 setConnectionBadge(this.badge, "success");
                 this.is_open = true;
-                if (this.opened)
-                    this.opened(event);
+                if (this.opened) this.opened(event);
             }
-            if (this.message)
-                this.message(event);
+            if (this.message) this.message(event);
         }
 
         connect() {
@@ -1310,9 +1323,8 @@ $(function () {
             if (this.ws) {
                 return;
             }
-            var ws = this.ws = new WebSocket(this.url);
-            if (this.binary)
-                ws.binaryType = "arraybuffer";
+            var ws = (this.ws = new WebSocket(this.url));
+            if (this.binary) ws.binaryType = "arraybuffer";
             ws.addEventListener("open", this._open.bind(this));
             ws.addEventListener("close", this._close.bind(this));
             ws.addEventListener("error", this._error.bind(this));
@@ -1399,8 +1411,7 @@ $(function () {
             el.innerHTML = "";
             return;
         }
-        el.innerHTML =
-            `<div class="alert alert-${category} py-2 small mb-0">${escapeHtml(message)}</div>`;
+        el.innerHTML = `<div class="alert alert-${category} py-2 small mb-0">${escapeHtml(message)}</div>`;
     }
 
     function applyZOffsetState(zOffset, options = {}) {
@@ -1450,7 +1461,7 @@ $(function () {
 
         applyZOffsetState(data.z_offset, {
             populateTarget: options.populateTarget === true,
-            statusMessage: options.statusMessage ? (data.message || options.statusMessage) : null,
+            statusMessage: options.statusMessage ? data.message || options.statusMessage : null,
             statusCategory: options.statusCategory || "secondary",
         });
         return data;
@@ -1467,7 +1478,7 @@ $(function () {
 
     function _updateMqttReconnectButton() {
         if (!$("#mqtt-reconnect-hint").length) return;
-        var stale = _mqttLastMessageAt > 0 && (Date.now() - _mqttLastMessageAt) > 90000;
+        var stale = _mqttLastMessageAt > 0 && Date.now() - _mqttLastMessageAt > 90000;
         if (stale !== _mqttReconnectVisible) {
             _mqttReconnectVisible = stale;
             $("#mqtt-reconnect-hint").toggle(stale);
@@ -1476,18 +1487,19 @@ $(function () {
 
     function triggerMqttReconnect(e) {
         if (e) e.preventDefault();
-        fetch(withActivePrinterQuery("/api/mqtt/reconnect"), { method: "POST" })
-            .catch(function(err) { console.warn("mqtt reconnect failed", err); });
+        fetch(withActivePrinterQuery("/api/mqtt/reconnect"), { method: "POST" }).catch(function (err) {
+            console.warn("mqtt reconnect failed", err);
+        });
         // Optimistically hide and reset timer so we don't double-trigger
         _mqttLastMessageAt = Date.now();
         _updateMqttReconnectButton();
     }
 
     window._intervalRegistry = window._intervalRegistry || {};
-    if (window._intervalRegistry['mqttReconnectButton']) {
-        clearInterval(window._intervalRegistry['mqttReconnectButton']);
+    if (window._intervalRegistry["mqttReconnectButton"]) {
+        clearInterval(window._intervalRegistry["mqttReconnectButton"]);
     }
-    window._intervalRegistry['mqttReconnectButton'] = setInterval(_updateMqttReconnectButton, 5000);
+    window._intervalRegistry["mqttReconnectButton"] = setInterval(_updateMqttReconnectButton, 5000);
     $(document).on("click", "#btn-mqtt-reconnect", triggerMqttReconnect);
 
     sockets.mqtt = new AutoWebSocket({
@@ -1513,9 +1525,10 @@ $(function () {
                 if (Number(data.subType) === 2 && Number(data.value) === 6) {
                     _filamentStatus.pendingRunout = false;
                     _filamentStatus.label = "Not Loaded";
-                    _filamentStatus.detail = _currentPrintState === PRINT_STATE.PAUSED
-                        ? "Paused: Filament runout. Reload filament to continue."
-                        : "Filament runout or break detected.";
+                    _filamentStatus.detail =
+                        _currentPrintState === PRINT_STATE.PAUSED
+                            ? "Paused: Filament runout. Reload filament to continue."
+                            : "Filament runout or break detected.";
                     _filamentStatus.issue = "runout";
                     _filamentStatus.pauseReason = "Filament runout";
                     renderFilamentStatus();
@@ -1523,10 +1536,15 @@ $(function () {
                 }
                 // Printer state machine: normalize firmware resume acknowledgements for UI controls.
                 const normalizedState = _normalizePrintStateValue(data.value);
-                const wasPausedForFilament = _currentPrintState === PRINT_STATE.PAUSED
-                    && !!_filamentStatus.pauseReason
-                    && _filamentStatus.issue === "runout";
-                if (normalizedState === PRINT_STATE.PAUSED && _filamentStatus.pendingRunout && _filamentStatus.issue !== "runout") {
+                const wasPausedForFilament =
+                    _currentPrintState === PRINT_STATE.PAUSED &&
+                    !!_filamentStatus.pauseReason &&
+                    _filamentStatus.issue === "runout";
+                if (
+                    normalizedState === PRINT_STATE.PAUSED &&
+                    _filamentStatus.pendingRunout &&
+                    _filamentStatus.issue !== "runout"
+                ) {
                     _filamentStatus.pendingRunout = false;
                     _filamentStatus.label = "Not Loaded";
                     _filamentStatus.detail = "Paused: Filament runout. Reload filament to continue.";
@@ -1568,15 +1586,14 @@ $(function () {
                     $("#progressbar").attr("aria-valuenow", progress);
                     $("#progressbar").attr("style", `width: ${progress}%`);
                     $("#progress").text(`${progress}%`);
-                    document.title = progress > 0 && progress < 100
-                        ? `\u{1F5A8}\uFE0F ${progress}% | ankerctl`
-                        : "ankerctl";
+                    document.title =
+                        progress > 0 && progress < 100 ? `\u{1F5A8}\uFE0F ${progress}% | ankerctl` : "ankerctl";
                 }
             } else if (data.commandType == 1003) {
                 // Returns Nozzle Temp
                 const current = getTempRounded(data.currentTemp);
                 $("#nozzle-temp").text(`${current}°C`);
-                if (data.hasOwnProperty('targetTemp')) {
+                if (data.hasOwnProperty("targetTemp")) {
                     const target = getTempRounded(data.targetTemp);
                     if (!$("#set-nozzle-temp").is(":focus")) {
                         $("#set-nozzle-temp").val(target);
@@ -1595,7 +1612,7 @@ $(function () {
                 // Returns Bed Temp
                 const current = getTempRounded(data.currentTemp);
                 $("#bed-temp").text(`${current}°C`);
-                if (data.hasOwnProperty('targetTemp')) {
+                if (data.hasOwnProperty("targetTemp")) {
                     const target = getTempRounded(data.targetTemp);
                     if (!$("#set-bed-temp").is(":focus")) {
                         $("#set-bed-temp").val(target);
@@ -1618,7 +1635,7 @@ $(function () {
                 // auto_leveling: value = current probe point (1 center + 7×7 = 50 points total)
                 const point = data.value;
                 const total = 50;
-                const pct = Math.min(100, Math.round(point / total * 100));
+                const pct = Math.min(100, Math.round((point / total) * 100));
                 const statusEl = document.getElementById("bed-level-status");
                 if (statusEl) {
                     statusEl.innerHTML =
@@ -1641,17 +1658,19 @@ $(function () {
             } else if (isFilamentRunoutEvent(data)) {
                 _filamentStatus.pendingRunout = false;
                 _filamentStatus.label = "Not Loaded";
-                _filamentStatus.detail = _currentPrintState === PRINT_STATE.PAUSED
-                    ? "Paused: Filament runout. Reload filament to continue."
-                    : "Filament runout or break detected.";
+                _filamentStatus.detail =
+                    _currentPrintState === PRINT_STATE.PAUSED
+                        ? "Paused: Filament runout. Reload filament to continue."
+                        : "Filament runout or break detected.";
                 _filamentStatus.issue = "runout";
                 _filamentStatus.pauseReason = "Filament runout";
                 renderFilamentStatus();
             } else if (data.commandType == 1023) {
                 const label = getFilamentStateLabel(data.value, data.progress, data.stepLen);
-                const inFilamentRunoutPause = _currentPrintState === PRINT_STATE.PAUSED
-                    && !!_filamentStatus.pauseReason
-                    && _filamentStatus.issue === "runout";
+                const inFilamentRunoutPause =
+                    _currentPrintState === PRINT_STATE.PAUSED &&
+                    !!_filamentStatus.pauseReason &&
+                    _filamentStatus.issue === "runout";
                 if (inFilamentRunoutPause && label === "Loaded") {
                     _filamentStatus.label = "Not Loaded";
                     _filamentStatus.detail = null;
@@ -1742,14 +1761,16 @@ $(function () {
                 },
             });
             this.videoPump = window.setInterval(() => {
-                if (!this.jmuxer)
-                    return;
+                if (!this.jmuxer) return;
 
-                const now = (window.performance && window.performance.now) ? window.performance.now() : Date.now();
+                const now = window.performance && window.performance.now ? window.performance.now() : Date.now();
                 if (this.videoBuffering) {
                     const firstPacket = this.videoQueue[0];
                     const firstPacketAge = firstPacket ? now - firstPacket.receivedAt : 0;
-                    if (this.videoQueue.length < this.videoBufferMinPackets && firstPacketAge < this.videoBufferDelayMs) {
+                    if (
+                        this.videoQueue.length < this.videoBufferMinPackets &&
+                        firstPacketAge < this.videoBufferDelayMs
+                    ) {
                         return;
                     }
                     this.videoBuffering = false;
@@ -1788,7 +1809,7 @@ $(function () {
             if (!this.videoQueue) {
                 this.videoQueue = [];
             }
-            const now = (window.performance && window.performance.now) ? window.performance.now() : Date.now();
+            const now = window.performance && window.performance.now ? window.performance.now() : Date.now();
             this.videoQueue.push({
                 data: event.data.slice(0),
                 receivedAt: now,
@@ -1808,8 +1829,7 @@ $(function () {
             this.videoQueue = [];
             this.videoBuffering = true;
 
-            if (!this.jmuxer)
-                return;
+            if (!this.jmuxer) return;
 
             this.jmuxer.destroy();
             this.jmuxer = null;
@@ -1962,7 +1982,11 @@ $(function () {
                 const total = data.size || uploadSize;
                 const sizeText = total ? ` (${formatBytes(total)})` : "";
                 if (data.start_print === true) {
-                    uploadMeta.text(uploadName ? `Upload complete, printer preparing: ${uploadName}${sizeText}` : "Upload complete, printer preparing");
+                    uploadMeta.text(
+                        uploadName
+                            ? `Upload complete, printer preparing: ${uploadName}${sizeText}`
+                            : "Upload complete, printer preparing",
+                    );
                     if (_currentPrintState === PRINT_STATE.IDLE) {
                         if (uploadName) {
                             $("#print-name").text(uploadName);
@@ -2039,8 +2063,12 @@ $(function () {
      * @param {boolean|null} on - true = light on, false = light off, null = unknown
      */
     function setLightActive(on) {
-        $("#light-on").toggleClass("active", on === true).attr("aria-pressed", on === true ? "true" : "false");
-        $("#light-off").toggleClass("active", on === false).attr("aria-pressed", on === false ? "true" : "false");
+        $("#light-on")
+            .toggleClass("active", on === true)
+            .attr("aria-pressed", on === true ? "true" : "false");
+        $("#light-off")
+            .toggleClass("active", on === false)
+            .attr("aria-pressed", on === false ? "true" : "false");
     }
 
     /**
@@ -2230,7 +2258,7 @@ $(function () {
             const opt = document.createElement("option");
             opt.value = item.c;
             opt.textContent = item.n;
-            opt.selected = (currentCountry == item.c);
+            opt.selected = currentCountry == item.c;
             selectElement[0].appendChild(opt);
         });
     })($("#loginCountry"));
@@ -2253,12 +2281,14 @@ $(function () {
             }
 
             submitBtn.prop("disabled", true);
-            submitBtn.html('<span class="spinner-border spinner-border-sm me-2" role="status" aria-hidden="true"></span>Working...');
+            submitBtn.html(
+                '<span class="spinner-border spinner-border-sm me-2" role="status" aria-hidden="true"></span>Working...',
+            );
 
             try {
                 const resp = await fetch(url, {
-                    method: 'POST',
-                    body: form_data
+                    method: "POST",
+                    body: form_data,
                 });
 
                 if (resp.status < 300) {
@@ -2267,12 +2297,10 @@ $(function () {
                     if ("redirect" in data) {
                         document.location = data["redirect"];
                         return;
-                    }
-                    else if ("error" in data) {
+                    } else if ("error" in data) {
                         flash_message(data["error"], "danger");
                         input.get(0).focus();
-                    }
-                    else if ("captcha_id" in data) {
+                    } else if ("captcha_id" in data) {
                         input.val("");
                         input.attr("aria-required", "true");
                         input.prop("required", true);
@@ -2281,12 +2309,10 @@ $(function () {
                         $("#loginCaptchaImg").attr("src", data["captcha_url"]);
                         $("#captchaRow").show();
                     }
+                } else {
+                    flash_message(`HTTP Error ${resp.status}: ${resp.statusText}`, "danger");
                 }
-                else {
-                    flash_message(`HTTP Error ${resp.status}: ${resp.statusText}`, "danger")
-                }
-            }
-            finally {
+            } finally {
                 submitBtn.prop("disabled", false);
                 submitBtn.html(originalButtonHtml);
             }
@@ -2310,7 +2336,10 @@ $(function () {
                 if (effectiveSource === "config") {
                     flash_message(`Upload rate set to ${effectiveRate} Mbps`, "success");
                 } else {
-                    flash_message(`Saved ${rate} Mbps, but effective upload rate is ${effectiveRate} Mbps from ${effectiveSource}`, "warning");
+                    flash_message(
+                        `Saved ${rate} Mbps, but effective upload rate is ${effectiveRate} Mbps from ${effectiveSource}`,
+                        "warning",
+                    );
                 }
             } else {
                 const data = await resp.json().catch(() => ({}));
@@ -2351,7 +2380,10 @@ $(function () {
                     "success",
                 );
             } else if (data.saved_count > 0) {
-                flash_message(`LAN search saved ${data.saved_count} printer IP entr${data.saved_count === 1 ? "y" : "ies"} to default.json.`, "success");
+                flash_message(
+                    `LAN search saved ${data.saved_count} printer IP entr${data.saved_count === 1 ? "y" : "ies"} to default.json.`,
+                    "success",
+                );
             } else {
                 flash_message("LAN search found printers, but none matched the configured DUIDs.", "warning");
             }
@@ -2393,31 +2425,42 @@ $(function () {
         if (!highlights.length) {
             highlightsEl.innerHTML = '<div class="text-muted small">No stable highlights available.</div>';
         } else {
-            highlightsEl.innerHTML = highlights.map((item) => `
+            highlightsEl.innerHTML = highlights
+                .map(
+                    (item) => `
                 <div class="border rounded p-2">
                     <div class="text-muted small">${escapeHtml(item.label || item.command || "Value")}</div>
                     <div class="fw-semibold">${escapeHtml(item.value || "unknown")}</div>
                     <div class="small font-monospace text-body-secondary">${escapeHtml(item.command || "")}</div>
                 </div>
-            `).join("");
+            `,
+                )
+                .join("");
         }
 
         const groups = data.groups || {};
         const groupHtml = Object.entries(groups)
             .filter(([, entries]) => Array.isArray(entries) && entries.length)
-            .map(([name, entries]) => `
+            .map(
+                ([name, entries]) => `
                 <div>
                     <div class="text-muted small mb-1">${escapeHtml(titleCaseWords(name))}</div>
                     <div class="vstack gap-1">
-                        ${entries.map((entry) => `
+                        ${entries
+                            .map(
+                                (entry) => `
                             <div class="border rounded px-2 py-1 font-monospace small">
                                 <span class="text-body-secondary me-2">${escapeHtml(entry.command || "")}</span>
                                 <span>${escapeHtml(entry.value || "")}</span>
                             </div>
-                        `).join("")}
+                        `,
+                            )
+                            .join("")}
                     </div>
                 </div>
-            `).join("");
+            `,
+            )
+            .join("");
 
         groupsEl.innerHTML = groupHtml || '<div class="text-muted small">No grouped settings available.</div>';
     }
@@ -2561,8 +2604,8 @@ $(function () {
         fetch(withActivePrinterQuery("/api/printer/gcode"), {
             method: "POST",
             headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ gcode: gcode })
-        }).catch(err => console.error("Failed to send GCode:", err));
+            body: JSON.stringify({ gcode: gcode }),
+        }).catch((err) => console.error("Failed to send GCode:", err));
     }
 
     function sendPrinterHome(axis) {
@@ -2570,16 +2613,16 @@ $(function () {
         fetch(withActivePrinterQuery("/api/printer/home"), {
             method: "POST",
             headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ axis: targetAxis })
-        }).catch(err => console.error("Failed to send home command:", err));
+            body: JSON.stringify({ axis: targetAxis }),
+        }).catch((err) => console.error("Failed to send home command:", err));
     }
 
     function sendPrintControl(value) {
         fetch(withActivePrinterQuery("/api/printer/control"), {
             method: "POST",
             headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ value: value })
-        }).catch(err => console.error("Failed to send print control:", err));
+            body: JSON.stringify({ value: value }),
+        }).catch((err) => console.error("Failed to send print control:", err));
     }
 
     const PRINT_CONTROL = {
@@ -2604,17 +2647,18 @@ $(function () {
 
     function _isPrintStateActive(state = _currentPrintState) {
         const normalizedState = _normalizePrintStateValue(state);
-        return normalizedState === PRINT_STATE.PRINTING
-            || normalizedState === PRINT_STATE.PAUSED
-            || normalizedState === PRINT_STATE.CALIBRATING
-            || normalizedState === PRINT_STATE.STOPPING
-            || normalizedState === PRINT_STATE.PENDING_START;
+        return (
+            normalizedState === PRINT_STATE.PRINTING ||
+            normalizedState === PRINT_STATE.PAUSED ||
+            normalizedState === PRINT_STATE.CALIBRATING ||
+            normalizedState === PRINT_STATE.STOPPING ||
+            normalizedState === PRINT_STATE.PENDING_START
+        );
     }
 
     function _isStoredFileSourcePath(filePath) {
         const path = String(filePath || "");
-        return path.startsWith("/tmp/udisk/")
-            || path.startsWith("/usr/data/local/model/");
+        return path.startsWith("/tmp/udisk/") || path.startsWith("/usr/data/local/model/");
     }
 
     function _updatePrintControlButtons(state) {
@@ -2653,16 +2697,43 @@ $(function () {
         sendPrinterHome(axis);
     }
 
-    $("#move-x-plus").on("click", function () { sendPrinterGCode(`G91\nG0 X${getStepDist()} F3000\nG90`); return false; });
-    $("#move-x-minus").on("click", function () { sendPrinterGCode(`G91\nG0 X-${getStepDist()} F3000\nG90`); return false; });
-    $("#move-y-plus").on("click", function () { sendPrinterGCode(`G91\nG0 Y${getStepDist()} F3000\nG90`); return false; });
-    $("#move-y-minus").on("click", function () { sendPrinterGCode(`G91\nG0 Y-${getStepDist()} F3000\nG90`); return false; });
-    $("#move-z-plus").on("click", function () { sendPrinterGCode(`G91\nG0 Z${getStepDist()} F600\nG90`); return false; });
-    $("#move-z-minus").on("click", function () { sendPrinterGCode(`G91\nG0 Z-${getStepDist()} F600\nG90`); return false; });
+    $("#move-x-plus").on("click", function () {
+        sendPrinterGCode(`G91\nG0 X${getStepDist()} F3000\nG90`);
+        return false;
+    });
+    $("#move-x-minus").on("click", function () {
+        sendPrinterGCode(`G91\nG0 X-${getStepDist()} F3000\nG90`);
+        return false;
+    });
+    $("#move-y-plus").on("click", function () {
+        sendPrinterGCode(`G91\nG0 Y${getStepDist()} F3000\nG90`);
+        return false;
+    });
+    $("#move-y-minus").on("click", function () {
+        sendPrinterGCode(`G91\nG0 Y-${getStepDist()} F3000\nG90`);
+        return false;
+    });
+    $("#move-z-plus").on("click", function () {
+        sendPrinterGCode(`G91\nG0 Z${getStepDist()} F600\nG90`);
+        return false;
+    });
+    $("#move-z-minus").on("click", function () {
+        sendPrinterGCode(`G91\nG0 Z-${getStepDist()} F600\nG90`);
+        return false;
+    });
 
-    $("#control-home-xy").on("click", function () { sendHomeCommand("xy"); return false; });
-    $("#control-home-z").on("click", function () { sendHomeCommand("z"); return false; });
-    $("#control-home-all").on("click", function () { sendHomeCommand("all"); return false; });
+    $("#control-home-xy").on("click", function () {
+        sendHomeCommand("xy");
+        return false;
+    });
+    $("#control-home-z").on("click", function () {
+        sendHomeCommand("z");
+        return false;
+    });
+    $("#control-home-all").on("click", function () {
+        sendHomeCommand("all");
+        return false;
+    });
 
     // ------------------------------------------------------------------
     // Bed Level Map — shared rendering utilities
@@ -2840,7 +2911,7 @@ $(function () {
      * @param {string} id
      */
     function bedSnapDelete(id) {
-        const snaps = bedSnapLoad().filter(s => s.id !== id);
+        const snaps = bedSnapLoad().filter((s) => s.id !== id);
         bedSnapSave(snaps);
         bedSnapRefreshUI();
     }
@@ -2859,7 +2930,7 @@ $(function () {
             if (snaps.length === 0) {
                 selA.innerHTML = '<option value="" disabled selected>No bed maps saved yet</option>';
             } else {
-                snaps.forEach(s => {
+                snaps.forEach((s) => {
                     const opt = document.createElement("option");
                     opt.value = s.id;
                     opt.textContent = s.label;
@@ -2874,7 +2945,7 @@ $(function () {
         if (selB) {
             const prevB = selB.value;
             selB.innerHTML = '<option value="live">Read live from printer</option>';
-            snaps.forEach(s => {
+            snaps.forEach((s) => {
                 const opt = document.createElement("option");
                 opt.value = s.id;
                 opt.textContent = s.label;
@@ -2890,7 +2961,7 @@ $(function () {
                 listEl.innerHTML = '<span class="text-muted small">No bed maps saved yet.</span>';
             } else {
                 listEl.innerHTML = "";
-                snaps.forEach(s => {
+                snaps.forEach((s) => {
                     const row = document.createElement("div");
                     row.className = "d-flex justify-content-between align-items-center border-bottom py-1";
                     row.innerHTML =
@@ -2937,7 +3008,7 @@ $(function () {
         statusEl.innerHTML =
             '<div class="alert alert-info py-2 small mb-0">' +
             '<span class="spinner-border spinner-border-sm me-2" role="status"></span>' +
-            'Sending M420 V \u2014 waiting for printer response (up to 15 s)...</div>';
+            "Sending M420 V \u2014 waiting for printer response (up to 15 s)...</div>";
         if (gridEl) gridEl.style.display = "none";
         if (readBtn) readBtn.prop ? $(readBtn).prop("disabled", true) : (readBtn.disabled = true);
 
@@ -2969,8 +3040,7 @@ $(function () {
             if (saveBtn) saveBtn.disabled = false;
         } catch (err) {
             statusEl.innerHTML =
-                `<div class="alert alert-danger py-2 small mb-0">` +
-                `Request failed: ${escapeHtml(String(err))}</div>`;
+                `<div class="alert alert-danger py-2 small mb-0">` + `Request failed: ${escapeHtml(String(err))}</div>`;
         } finally {
             if (readBtn) readBtn.disabled = false;
         }
@@ -2992,12 +3062,13 @@ $(function () {
 
         const snapIdA = selA ? selA.value : "";
         if (!snapIdA) {
-            statusEl.innerHTML = '<div class="alert alert-warning py-2 small mb-0">Please select Bed Map A first.</div>';
+            statusEl.innerHTML =
+                '<div class="alert alert-warning py-2 small mb-0">Please select Bed Map A first.</div>';
             return;
         }
 
         const snaps = bedSnapLoad();
-        const snapA = snaps.find(s => s.id === snapIdA);
+        const snapA = snaps.find((s) => s.id === snapIdA);
         if (!snapA) {
             statusEl.innerHTML = '<div class="alert alert-danger py-2 small mb-0">Bed Map A not found.</div>';
             return;
@@ -3010,7 +3081,7 @@ $(function () {
             statusEl.innerHTML =
                 '<div class="alert alert-info py-2 small mb-0">' +
                 '<span class="spinner-border spinner-border-sm me-2" role="status"></span>' +
-                'Reading live data from printer...</div>';
+                "Reading live data from printer...</div>";
             try {
                 const resp = await fetch(withActivePrinterQuery("/api/printer/bed-leveling"));
                 const parsed = await resp.json();
@@ -3028,7 +3099,7 @@ $(function () {
                 return;
             }
         } else {
-            const snapB = snaps.find(s => s.id === snapBId);
+            const snapB = snaps.find((s) => s.id === snapBId);
             if (!snapB) {
                 statusEl.innerHTML = '<div class="alert alert-danger py-2 small mb-0">Bed Map B not found.</div>';
                 return;
@@ -3042,7 +3113,7 @@ $(function () {
         if (!diffGrid) {
             statusEl.innerHTML =
                 '<div class="alert alert-warning py-2 small mb-0">' +
-                'Cannot compare: grids have different dimensions.</div>';
+                "Cannot compare: grids have different dimensions.</div>";
             return;
         }
 
@@ -3060,7 +3131,7 @@ $(function () {
         if (diffStatsEl) {
             const avg = diffFlat.reduce((a, b) => a + b, 0) / diffFlat.length;
             const maxImprovement = -diffMin; // most negative diff = biggest improvement (lower deviation)
-            const maxRegression = diffMax;   // most positive diff = biggest regression
+            const maxRegression = diffMax; // most positive diff = biggest regression
             diffStatsEl.innerHTML =
                 `<div><strong>Avg shift:</strong> ${avg >= 0 ? "+" : ""}${avg.toFixed(3)} mm</div>` +
                 `<div><strong>Max improvement:</strong> ${maxImprovement.toFixed(3)} mm</div>` +
@@ -3081,7 +3152,7 @@ $(function () {
         statusEl.innerHTML =
             '<div class="alert alert-info py-2 small mb-0">' +
             '<span class="spinner-border spinner-border-sm me-2" role="status"></span>' +
-            'Loading last saved map\u2026</div>';
+            "Loading last saved map\u2026</div>";
         if (gridEl) gridEl.style.display = "none";
 
         try {
@@ -3114,18 +3185,23 @@ $(function () {
             if (saveBtn) saveBtn.disabled = false;
         } catch (err) {
             statusEl.innerHTML =
-                `<div class="alert alert-danger py-2 small mb-0">` +
-                `Request failed: ${escapeHtml(String(err))}</div>`;
+                `<div class="alert alert-danger py-2 small mb-0">` + `Request failed: ${escapeHtml(String(err))}</div>`;
         }
     }
 
     // Wire up Setup > Tools bed level buttons
-    $("#bed-level-read-btn").on("click", function () { bedLevelRead(); });
-    $("#bed-level-load-last-btn").on("click", function () { bedLevelLoadLast(); });
+    $("#bed-level-read-btn").on("click", function () {
+        bedLevelRead();
+    });
+    $("#bed-level-load-last-btn").on("click", function () {
+        bedLevelLoadLast();
+    });
     $("#bed-level-save-btn").on("click", function () {
         bedSnapAdd(_currentBedData);
     });
-    $("#bed-compare-btn").on("click", function () { bedLevelCompare(); });
+    $("#bed-compare-btn").on("click", function () {
+        bedLevelCompare();
+    });
 
     // Delegate delete buttons in snapshot list
     $(document).on("click", ".bed-snap-delete-btn", function () {
@@ -3165,7 +3241,7 @@ $(function () {
                 statusEl.innerHTML =
                     '<div class="alert alert-success py-2 small mb-0">' +
                     '<span class="spinner-border spinner-border-sm me-2" role="status"></span>' +
-                    'Bed leveling complete — reading grid...</div>';
+                    "Bed leveling complete — reading grid...</div>";
             }
             bedLevelRead();
         }
@@ -3199,7 +3275,7 @@ $(function () {
                     statusEl.innerHTML =
                         '<div class="alert alert-info py-2 small mb-0">' +
                         '<span class="spinner-border spinner-border-sm me-2" role="status"></span>' +
-                        'Waiting for bed leveling to complete\u2026</div>';
+                        "Waiting for bed leveling to complete\u2026</div>";
                 }
                 if (gridEl) gridEl.style.display = "none";
 
@@ -3366,13 +3442,16 @@ $(function () {
         const btn = $(this);
         btn.prop("disabled", true);
         try {
-            await saveCameraSettings({
-                external: {
-                    name: $("#camera-external-name").val().trim(),
-                    stream_url: $("#camera-external-stream-url").val().trim(),
-                    snapshot_url: $("#camera-external-snapshot-url").val().trim(),
+            await saveCameraSettings(
+                {
+                    external: {
+                        name: $("#camera-external-name").val().trim(),
+                        stream_url: $("#camera-external-stream-url").val().trim(),
+                        snapshot_url: $("#camera-external-snapshot-url").val().trim(),
+                    },
                 },
-            }, "External camera settings saved");
+                "External camera settings saved",
+            );
         } catch (err) {
             flash_message(`Failed to save camera settings: ${err.message || err}`, "danger");
         } finally {
@@ -3384,11 +3463,14 @@ $(function () {
         const btn = $(this);
         btn.prop("disabled", true);
         try {
-            await saveCameraSettings({
-                integration: {
-                    enabled: !!$("#camera-integration-enabled").prop("checked"),
+            await saveCameraSettings(
+                {
+                    integration: {
+                        enabled: !!$("#camera-integration-enabled").prop("checked"),
+                    },
                 },
-            }, "Integration stream settings saved");
+                "Integration stream settings saved",
+            );
         } catch (err) {
             flash_message(`Failed to save integration stream settings: ${err.message || err}`, "danger");
         } finally {
@@ -3397,21 +3479,25 @@ $(function () {
     });
 
     function copyIntegrationUrl(inputId, label) {
-        const url = $("#" + inputId).val().trim();
+        const url = $("#" + inputId)
+            .val()
+            .trim();
         if (!url) {
             flash_message("No URL to copy. Enable the integration stream and save first.", "warning");
             return;
         }
         const fallback = () => {
             const el = document.getElementById(inputId);
-            if (el) { el.select(); document.execCommand("copy"); }
+            if (el) {
+                el.select();
+                document.execCommand("copy");
+            }
             flash_message("URL selected — press Ctrl+C to copy.", "info");
         };
         if (navigator.clipboard && navigator.clipboard.writeText) {
-            navigator.clipboard.writeText(url).then(
-                () => flash_message(`${label} copied to clipboard.`, "success"),
-                fallback
-            );
+            navigator.clipboard
+                .writeText(url)
+                .then(() => flash_message(`${label} copied to clipboard.`, "success"), fallback);
         } else {
             fallback();
         }
@@ -3446,11 +3532,12 @@ $(function () {
             } else {
                 setPrinterVideoEnabled(false);
             }
-            const successMessage = selected === "external"
-                ? (_cameraState.externalConfigured
-                    ? "Camera source switched to external camera."
-                    : "External camera selected. Finish setup in Setup -> Camera to use it.")
-                : "Camera source switched to printer camera.";
+            const successMessage =
+                selected === "external"
+                    ? _cameraState.externalConfigured
+                        ? "Camera source switched to external camera."
+                        : "External camera selected. Finish setup in Setup -> Camera to use it."
+                    : "Camera source switched to printer camera.";
             await saveCameraSettings({ source: selected }, successMessage);
         } catch (err) {
             _externalCameraPreviewEnabled = previousExternalPreviewEnabled;
@@ -3532,8 +3619,8 @@ $(function () {
         }
         return gcode
             .split(/\r?\n/)
-            .map(line => line.split(";", 1)[0].trim())
-            .filter(line => line.length > 0)
+            .map((line) => line.split(";", 1)[0].trim())
+            .filter((line) => line.length > 0)
             .join("\n");
     }
 
@@ -3541,11 +3628,13 @@ $(function () {
         if (!gcode) {
             return false;
         }
-        const nonEmptyLines = gcode.split(/\r?\n/).filter(line => line.trim().length > 0).length;
-        return nonEmptyLines >= 100
-            || /(^|\n)\s*;LAYER_COUNT:/i.test(gcode)
-            || /(^|\n)\s*; estimated printing time/i.test(gcode)
-            || /(^|\n)\s*; generated by /i.test(gcode);
+        const nonEmptyLines = gcode.split(/\r?\n/).filter((line) => line.trim().length > 0).length;
+        return (
+            nonEmptyLines >= 100 ||
+            /(^|\n)\s*;LAYER_COUNT:/i.test(gcode) ||
+            /(^|\n)\s*; estimated printing time/i.test(gcode) ||
+            /(^|\n)\s*; generated by /i.test(gcode)
+        );
     }
 
     function gcodeStorageSourceLabel(source) {
@@ -3558,11 +3647,13 @@ $(function () {
 
     function isGCodeStorageLocked() {
         const normalizedState = _normalizePrintStateValue(_currentPrintState);
-        return normalizedState === PRINT_STATE.PRINTING
-            || normalizedState === PRINT_STATE.PAUSED
-            || normalizedState === PRINT_STATE.CALIBRATING
-            || normalizedState === PRINT_STATE.STOPPING
-            || normalizedState === PRINT_STATE.PENDING_START;
+        return (
+            normalizedState === PRINT_STATE.PRINTING ||
+            normalizedState === PRINT_STATE.PAUSED ||
+            normalizedState === PRINT_STATE.CALIBRATING ||
+            normalizedState === PRINT_STATE.STOPPING ||
+            normalizedState === PRINT_STATE.PENDING_START
+        );
     }
 
     function isGCodeTabVisible() {
@@ -3642,13 +3733,13 @@ $(function () {
         selected
             .html(
                 '<div class="d-flex align-items-start gap-3">' +
-                buildGCodeThumbnail(file.thumbnail_url, file.name || "Stored file thumbnail") +
-                '<div class="flex-grow-1 min-w-0">' +
-                `<div class="fw-semibold">${escapeHtml(file.name || "Unnamed file")}</div>` +
-                `<div class="text-break"><code>${escapeHtml(file.path || "-")}</code></div>` +
-                `<div class="text-muted">Modified: ${escapeHtml(formatStorageTimestamp(file.timestamp))} · Source: ${escapeHtml(source)}</div>` +
-                "</div>" +
-                "</div>"
+                    buildGCodeThumbnail(file.thumbnail_url, file.name || "Stored file thumbnail") +
+                    '<div class="flex-grow-1 min-w-0">' +
+                    `<div class="fw-semibold">${escapeHtml(file.name || "Unnamed file")}</div>` +
+                    `<div class="text-break"><code>${escapeHtml(file.path || "-")}</code></div>` +
+                    `<div class="text-muted">Modified: ${escapeHtml(formatStorageTimestamp(file.timestamp))} · Source: ${escapeHtml(source)}</div>` +
+                    "</div>" +
+                    "</div>",
             )
             .show();
         setGCodeStoragePrintEnabled(true);
@@ -3666,7 +3757,7 @@ $(function () {
 
         if (!Array.isArray(files) || files.length === 0) {
             list.append(
-                `<div class="list-group-item text-muted small">No files found on ${escapeHtml(gcodeStorageSourceLabel(source))}.</div>`
+                `<div class="list-group-item text-muted small">No files found on ${escapeHtml(gcodeStorageSourceLabel(source))}.</div>`,
             );
             status.text(`No files found on ${gcodeStorageSourceLabel(source)}.`);
             return;
@@ -3740,7 +3831,7 @@ $(function () {
                 return;
             }
             $("#gcode-storage-list").html(
-                `<div class="list-group-item text-danger small">Failed to load ${escapeHtml(gcodeStorageSourceLabel(source))}: ${escapeHtml(err.message)}</div>`
+                `<div class="list-group-item text-danger small">Failed to load ${escapeHtml(gcodeStorageSourceLabel(source))}: ${escapeHtml(err.message)}</div>`,
             );
             renderGCodeStorageSelection(null);
             status.text(`Failed to load ${gcodeStorageSourceLabel(source)}.`);
@@ -3768,7 +3859,7 @@ $(function () {
         const resp = await fetch(withActivePrinterQuery("/api/printer/gcode"), {
             method: "POST",
             headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ gcode: normalized })
+            body: JSON.stringify({ gcode: normalized }),
         });
 
         const data = await resp.json().catch(() => ({}));
@@ -3804,9 +3895,11 @@ $(function () {
             const rate = data.upload_rate_mbps;
             const source = data.upload_rate_source;
             const rateText = rate ? ` using ${rate} Mbps (${source})` : "";
-            gcodeLog(startPrint
-                ? `✓ Upload started${rateText}, printer should begin after transfer completes`
-                : `✓ Upload started${rateText}`);
+            gcodeLog(
+                startPrint
+                    ? `✓ Upload started${rateText}, printer should begin after transfer completes`
+                    : `✓ Upload started${rateText}`,
+            );
             return true;
         }
 
@@ -3891,8 +3984,13 @@ $(function () {
         }
         if (isGCodeStorageLocked()) {
             gcodeLog("Stored file actions are paused while the printer is busy");
-            flash_message("The printer is busy right now. Wait for it to return to idle before browsing or starting another stored file.", "warning");
-            deferGCodeStorageRefresh("File list is paused while the printer is busy. It will refresh after the print stops.");
+            flash_message(
+                "The printer is busy right now. Wait for it to return to idle before browsing or starting another stored file.",
+                "warning",
+            );
+            deferGCodeStorageRefresh(
+                "File list is paused while the printer is busy. It will refresh after the print stops.",
+            );
             return;
         }
 
@@ -3920,7 +4018,11 @@ $(function () {
                 _updatePrintControlButtons(PRINT_STATE.PENDING_START);
             }
             gcodeLog(`Printer confirmed stored file start for ${confirmedName}`);
-            flash_message(`Printer confirmed ${confirmedName} from ${gcodeStorageSourceLabel(source)}.`, "success", 4000);
+            flash_message(
+                `Printer confirmed ${confirmedName} from ${gcodeStorageSourceLabel(source)}.`,
+                "success",
+                4000,
+            );
         } catch (err) {
             gcodeLog(`Failed to start stored file: ${err.message}`);
             flash_message(`Failed to start stored file: ${err.message}`, "danger");
@@ -3974,8 +4076,8 @@ $(function () {
         const confirmText = preparing
             ? "Cancel the printer prepare phase before the print starts?"
             : pendingStart
-                ? "Cancel the pending print before it starts?"
-                : "Are you sure you want to stop the print?";
+              ? "Cancel the pending print before it starts?"
+              : "Are you sure you want to stop the print?";
         if (confirm(confirmText)) {
             _lastStopCommandAt = now;
             sendPrintControl(PRINT_CONTROL.STOP);
@@ -3986,9 +4088,9 @@ $(function () {
     /**
      * Temperature Graph — client‑side ring buffer + Chart.js
      */
-    const TEMP_BUFFER_MAX = 3600;  // 1h at 1 sample/sec
-    let tempWindowSec = 300;       // default 5m
-    const tempData = [];           // [{t: Date, nC, nT, bC, bT}]
+    const TEMP_BUFFER_MAX = 3600; // 1h at 1 sample/sec
+    let tempWindowSec = 300; // default 5m
+    const tempData = []; // [{t: Date, nC, nT, bC, bT}]
     let lastTempPush = 0;
     let _pendingNozzle = { c: null, t: null };
     let _pendingBed = { c: null, t: null };
@@ -3996,11 +4098,14 @@ $(function () {
     function pushTempData(type, current, target) {
         if (type === "nozzle") {
             _pendingNozzle.c = current;
-            if (target !== null) { _pendingNozzle.t = target; }
-        }
-        else if (type === "bed") {
+            if (target !== null) {
+                _pendingNozzle.t = target;
+            }
+        } else if (type === "bed") {
             _pendingBed.c = current;
-            if (target !== null) { _pendingBed.t = target; }
+            if (target !== null) {
+                _pendingBed.t = target;
+            }
         }
 
         const now = Date.now();
@@ -4011,8 +4116,10 @@ $(function () {
 
         tempData.push({
             t: new Date(),
-            nC: _pendingNozzle.c, nT: _pendingNozzle.t,
-            bC: _pendingBed.c, bT: _pendingBed.t,
+            nC: _pendingNozzle.c,
+            nT: _pendingNozzle.t,
+            bC: _pendingBed.c,
+            bT: _pendingBed.t,
         });
         if (tempData.length > TEMP_BUFFER_MAX) tempData.shift();
     }
@@ -4032,25 +4139,41 @@ $(function () {
                         label: "Nozzle",
                         borderColor: "#ff6384",
                         backgroundColor: "rgba(255,99,132,0.1)",
-                        data: [], fill: false, tension: 0.3, pointRadius: 0, borderWidth: 2,
+                        data: [],
+                        fill: false,
+                        tension: 0.3,
+                        pointRadius: 0,
+                        borderWidth: 2,
                     },
                     {
                         label: "Nozzle Target",
                         borderColor: "#ff6384",
                         borderDash: [5, 5],
-                        data: [], fill: false, tension: 0, pointRadius: 0, borderWidth: 1,
+                        data: [],
+                        fill: false,
+                        tension: 0,
+                        pointRadius: 0,
+                        borderWidth: 1,
                     },
                     {
                         label: "Bed",
                         borderColor: "#36a2eb",
                         backgroundColor: "rgba(54,162,235,0.1)",
-                        data: [], fill: false, tension: 0.3, pointRadius: 0, borderWidth: 2,
+                        data: [],
+                        fill: false,
+                        tension: 0.3,
+                        pointRadius: 0,
+                        borderWidth: 2,
                     },
                     {
                         label: "Bed Target",
                         borderColor: "#36a2eb",
                         borderDash: [5, 5],
-                        data: [], fill: false, tension: 0, pointRadius: 0, borderWidth: 1,
+                        data: [],
+                        fill: false,
+                        tension: 0,
+                        pointRadius: 0,
+                        borderWidth: 1,
                     },
                 ],
             },
@@ -4078,18 +4201,18 @@ $(function () {
 
         // Refresh chart every 2s
         window._intervalRegistry = window._intervalRegistry || {};
-        if (window._intervalRegistry['tempChartRefresh']) {
-            clearInterval(window._intervalRegistry['tempChartRefresh']);
+        if (window._intervalRegistry["tempChartRefresh"]) {
+            clearInterval(window._intervalRegistry["tempChartRefresh"]);
         }
-        window._intervalRegistry['tempChartRefresh'] = setInterval(function () {
+        window._intervalRegistry["tempChartRefresh"] = setInterval(function () {
             if (!tempChart || tempData.length === 0) return;
             const cutoff = Date.now() - tempWindowSec * 1000;
-            const visible = tempData.filter(d => d.t.getTime() >= cutoff);
-            tempChart.data.labels = visible.map(d => d.t.toLocaleTimeString());
-            tempChart.data.datasets[0].data = visible.map(d => d.nC);
-            tempChart.data.datasets[1].data = visible.map(d => d.nT);
-            tempChart.data.datasets[2].data = visible.map(d => d.bC);
-            tempChart.data.datasets[3].data = visible.map(d => d.bT);
+            const visible = tempData.filter((d) => d.t.getTime() >= cutoff);
+            tempChart.data.labels = visible.map((d) => d.t.toLocaleTimeString());
+            tempChart.data.datasets[0].data = visible.map((d) => d.nC);
+            tempChart.data.datasets[1].data = visible.map((d) => d.nT);
+            tempChart.data.datasets[2].data = visible.map((d) => d.bC);
+            tempChart.data.datasets[3].data = visible.map((d) => d.bT);
             tempChart.update();
         }, 2000);
     }
@@ -4169,8 +4292,8 @@ $(function () {
 
     function fetchAndRenderHistoryFilter() {
         fetch("/api/printers")
-            .then(r => r.json())
-            .then(data => {
+            .then((r) => r.json())
+            .then((data) => {
                 renderHistoryFilterDropdown(data.printers, data.active_index);
             })
             .catch(() => {});
@@ -4218,9 +4341,13 @@ $(function () {
 
     function loadHistory(append) {
         const filterParam = historyFilter === "__all__" ? "all" : historyFilter;
-        fetch(withActivePrinterQuery(`/api/history?limit=${HISTORY_LIMIT}&offset=${historyOffset}&filter=${encodeURIComponent(filterParam)}`))
-            .then(r => r.json())
-            .then(data => {
+        fetch(
+            withActivePrinterQuery(
+                `/api/history?limit=${HISTORY_LIMIT}&offset=${historyOffset}&filter=${encodeURIComponent(filterParam)}`,
+            ),
+        )
+            .then((r) => r.json())
+            .then((data) => {
                 const tbody = $("#history-tbody");
                 if (!append) {
                     tbody.empty();
@@ -4229,7 +4356,7 @@ $(function () {
                 if (data.entries.length === 0 && !append) {
                     tbody.html('<tr><td colspan="7" class="text-center text-muted py-4">No history yet</td></tr>');
                 }
-                data.entries.forEach(e => {
+                data.entries.forEach((e) => {
                     const started = e.started_at ? new Date(e.started_at + "Z").toLocaleString() : "-";
                     const safeFilename = escapeHtml(e.filename);
                     const thumbnail = buildGCodeThumbnail(e.thumbnail_url, e.filename || "History thumbnail");
@@ -4238,9 +4365,10 @@ $(function () {
                     const checkboxCell = canDelete
                         ? `<input type="checkbox" class="form-check-input history-select-checkbox" data-history-id="${e.id}" ${isChecked ? "checked" : ""} aria-label="Select ${safeFilename}">`
                         : '<input type="checkbox" class="form-check-input" disabled aria-label="Cannot delete in-progress history entry">';
-                    const printerIndexAttr = (e.printer_index === null || e.printer_index === undefined)
-                        ? ""
-                        : ` data-history-printer-index="${escapeHtml(String(e.printer_index))}"`;
+                    const printerIndexAttr =
+                        e.printer_index === null || e.printer_index === undefined
+                            ? ""
+                            : ` data-history-printer-index="${escapeHtml(String(e.printer_index))}"`;
                     const actionCell = e.can_reprint
                         ? `<button class="btn btn-sm btn-outline-primary history-reprint-btn" data-history-id="${e.id}" data-history-name="${safeFilename}"${printerIndexAttr}>Reprint</button>`
                         : '<span class="text-muted small">-</span>';
@@ -4261,7 +4389,9 @@ $(function () {
                     </tr>`;
                     tbody.append(row);
                 });
-                $("#history-count").text(`${Math.min(historyOffset + data.entries.length, data.total)} / ${data.total} entries`);
+                $("#history-count").text(
+                    `${Math.min(historyOffset + data.entries.length, data.total)} / ${data.total} entries`,
+                );
                 if (historyOffset + data.entries.length < data.total) {
                     $("#history-load-more").show();
                 } else {
@@ -4269,7 +4399,7 @@ $(function () {
                 }
                 updateHistorySelectionUi();
             })
-            .catch(err => console.error("History load failed:", err));
+            .catch((err) => console.error("History load failed:", err));
     }
 
     // Load on tab switch — use native addEventListener because Cash.js splits
@@ -4362,7 +4492,10 @@ $(function () {
             selectedHistoryIds.clear();
             historyOffset = 0;
             loadHistory(false);
-            flash_message(`Deleted ${data.deleted || 0} history entr${(data.deleted || 0) === 1 ? "y" : "ies"}.`, "success");
+            flash_message(
+                `Deleted ${data.deleted || 0} history entr${(data.deleted || 0) === 1 ? "y" : "ies"}.`,
+                "success",
+            );
         } catch (err) {
             flash_message(`Delete failed: ${err.message || err}`, "danger");
         } finally {
@@ -4372,18 +4505,20 @@ $(function () {
     });
 
     $("#history-clear").on("click", function () {
-        const clearMessage = historyFilter === "__all__"
-            ? "Clear history across all printers?"
-            : `Clear history for ${historyScopeLabel()}?`;
+        const clearMessage =
+            historyFilter === "__all__"
+                ? "Clear history across all printers?"
+                : `Clear history for ${historyScopeLabel()}?`;
         if (!confirm(clearMessage)) return;
         const filterParam = historyFilter === "__all__" ? "all" : historyFilter;
-        fetch(withActivePrinterQuery(`/api/history?filter=${encodeURIComponent(filterParam)}`), { method: "DELETE" })
-            .then(() => {
-                selectedHistoryIds.clear();
-                historyOffset = 0;
-                loadHistory(false);
-                updateHistorySelectionUi();
-            });
+        fetch(withActivePrinterQuery(`/api/history?filter=${encodeURIComponent(filterParam)}`), {
+            method: "DELETE",
+        }).then(() => {
+            selectedHistoryIds.clear();
+            historyOffset = 0;
+            loadHistory(false);
+            updateHistorySelectionUi();
+        });
     });
 
     $(document).on("click", ".history-reprint-btn", async function () {
@@ -4440,7 +4575,7 @@ $(function () {
     const selectedTimelapseFiles = new Set();
 
     function getTimelapseSnapshotCollection(id) {
-        return _timelapseSnapshotCollections.find(collection => collection.id === id) || null;
+        return _timelapseSnapshotCollections.find((collection) => collection.id === id) || null;
     }
 
     function configureTimelapseSnapshotDeleteButton(mode, options = {}) {
@@ -4450,9 +4585,10 @@ $(function () {
         const enabled = options.enabled === true;
         deleteBtn.disabled = !enabled;
         deleteBtn.dataset.mode = mode || "frame";
-        deleteBtn.innerHTML = mode === "collection"
-            ? '<i class="bi bi-trash"></i> Discard Capture'
-            : '<i class="bi bi-trash"></i> Delete';
+        deleteBtn.innerHTML =
+            mode === "collection"
+                ? '<i class="bi bi-trash"></i> Discard Capture'
+                : '<i class="bi bi-trash"></i> Delete';
 
         if (options.collectionId) {
             deleteBtn.dataset.collection = options.collectionId;
@@ -4517,9 +4653,7 @@ $(function () {
     function getSnapshotCollectionSubtitle(collection) {
         if (!collection) return "";
         if (collection.state === "manual") {
-            return collection.source_label
-                ? `Manual snapshot from ${collection.source_label}.`
-                : "Manual snapshot.";
+            return collection.source_label ? `Manual snapshot from ${collection.source_label}.` : "Manual snapshot.";
         }
         if (collection.state === "capturing") {
             return "Timelapse capture in progress.";
@@ -4534,7 +4668,7 @@ $(function () {
 
     function timelapseSelectSnapshot(collectionId, frameName) {
         const collection = getTimelapseSnapshotCollection(collectionId);
-        const frame = collection ? (collection.frames || []).find(item => item.filename === frameName) : null;
+        const frame = collection ? (collection.frames || []).find((item) => item.filename === frameName) : null;
         const collectionSelect = document.getElementById("timelapse-snapshot-collection");
         const frameSelect = document.getElementById("timelapse-snapshot-select");
         const imageEl = document.getElementById("timelapse-snapshot-image");
@@ -4581,11 +4715,14 @@ $(function () {
             } else if (collection.allow_delete) {
                 statusEl.textContent = `${collection.frame_count} frame(s) available in this capture.`;
             } else if (collection.state === "capturing") {
-                statusEl.textContent = "This capture is still running. Frames are view-only until the timelapse finishes.";
+                statusEl.textContent =
+                    "This capture is still running. Frames are view-only until the timelapse finishes.";
             } else if (collection.state === "resume_pending") {
-                statusEl.textContent = "This paused capture is still resumable. Use Discard Capture if you want to remove it.";
+                statusEl.textContent =
+                    "This paused capture is still resumable. Use Discard Capture if you want to remove it.";
             } else {
-                statusEl.textContent = "This capture is still resumable. Frames are view-only until the timelapse is finalized.";
+                statusEl.textContent =
+                    "This capture is still resumable. Frames are view-only until the timelapse is finalized.";
             }
         }
         if (imageEl) {
@@ -4599,13 +4736,13 @@ $(function () {
                 clearTimelapseSnapshotPreview("Unable to load snapshot preview");
             };
             imageEl.src = withActivePrinterQuery(
-                `/api/timelapse-snapshot/${encodeURIComponent(collection.id)}/${encodeURIComponent(frame.filename)}`
+                `/api/timelapse-snapshot/${encodeURIComponent(collection.id)}/${encodeURIComponent(frame.filename)}`,
             );
         }
         if (downloadEl) {
             downloadEl.classList.remove("disabled");
             downloadEl.href = withActivePrinterQuery(
-                `/api/timelapse-snapshot/${encodeURIComponent(collection.id)}/${encodeURIComponent(frame.filename)}?download=1`
+                `/api/timelapse-snapshot/${encodeURIComponent(collection.id)}/${encodeURIComponent(frame.filename)}?download=1`,
             );
             downloadEl.setAttribute("download", frame.filename);
         }
@@ -4646,7 +4783,7 @@ $(function () {
         }
 
         collectionSelect.disabled = false;
-        _timelapseSnapshotCollections.forEach(collection => {
+        _timelapseSnapshotCollections.forEach((collection) => {
             const option = document.createElement("option");
             option.value = collection.id;
             const stateSuffix = getSnapshotCollectionStateSuffix(collection);
@@ -4670,7 +4807,7 @@ $(function () {
         }
 
         frameSelect.disabled = false;
-        frames.forEach(frame => {
+        frames.forEach((frame) => {
             const option = document.createElement("option");
             option.value = frame.filename;
             const created = frame.created_at ? new Date(frame.created_at).toLocaleTimeString() : "-";
@@ -4678,18 +4815,19 @@ $(function () {
             frameSelect.appendChild(option);
         });
 
-        const selectedFrame = frames.find(frame => frame.filename === _timelapseSelectedFrameName) || frames[frames.length - 1];
+        const selectedFrame =
+            frames.find((frame) => frame.filename === _timelapseSelectedFrameName) || frames[frames.length - 1];
         timelapseSelectSnapshot(selectedCollection.id, selectedFrame.filename);
     }
 
     function loadTimelapseSnapshots() {
         return fetch(withActivePrinterQuery("/api/timelapse-snapshots"))
-            .then(r => r.json())
-            .then(data => {
+            .then((r) => r.json())
+            .then((data) => {
                 _timelapseSnapshotCollections = Array.isArray(data.collections) ? data.collections : [];
                 renderTimelapseSnapshots();
             })
-            .catch(err => console.error("Timelapse snapshot load failed:", err));
+            .catch((err) => console.error("Timelapse snapshot load failed:", err));
     }
 
     function clearTimelapseVideoPreview(message) {
@@ -4722,7 +4860,7 @@ $(function () {
         if (placeholderEl) placeholderEl.style.display = "";
         if (deleteBtn) deleteBtn.removeAttribute("data-file");
 
-        document.querySelectorAll("#timelapse-list .list-group-item").forEach(el => {
+        document.querySelectorAll("#timelapse-list .list-group-item").forEach((el) => {
             el.classList.remove("active");
         });
     }
@@ -4736,7 +4874,7 @@ $(function () {
         const deleteBtn = document.getElementById("timelapse-player-delete");
         if (!videoEl) return;
 
-        document.querySelectorAll("#timelapse-list .list-group-item").forEach(el => {
+        document.querySelectorAll("#timelapse-list .list-group-item").forEach((el) => {
             el.classList.toggle("active", el.dataset.file === v.filename);
         });
 
@@ -4779,7 +4917,9 @@ $(function () {
     }
 
     async function deleteTimelapseFile(file) {
-        const resp = await fetch(withActivePrinterQuery(`/api/timelapse/${encodeURIComponent(file)}`), { method: "DELETE" });
+        const resp = await fetch(withActivePrinterQuery(`/api/timelapse/${encodeURIComponent(file)}`), {
+            method: "DELETE",
+        });
         const data = await resp.json().catch(() => ({}));
         if (!resp.ok) {
             throw new Error(data.error || `HTTP ${resp.status}`);
@@ -4794,12 +4934,12 @@ $(function () {
 
     function loadTimelapses() {
         fetch(withActivePrinterQuery("/api/timelapses"))
-            .then(r => r.json())
-            .then(data => {
+            .then((r) => r.json())
+            .then((data) => {
                 const banner = document.getElementById("timelapse-disabled-banner");
                 const list = document.getElementById("timelapse-list");
                 const videoEl = document.getElementById("timelapse-player");
-                const currentFile = videoEl ? (videoEl.dataset.file || "") : "";
+                const currentFile = videoEl ? videoEl.dataset.file || "" : "";
 
                 if (banner) banner.style.display = data.enabled ? "none" : "";
                 if (!list) return;
@@ -4815,14 +4955,14 @@ $(function () {
                 }
 
                 let currentFileStillExists = false;
-                const visibleFiles = new Set(data.videos.map(v => v.filename));
-                selectedTimelapseFiles.forEach(file => {
+                const visibleFiles = new Set(data.videos.map((v) => v.filename));
+                selectedTimelapseFiles.forEach((file) => {
                     if (!visibleFiles.has(file)) {
                         selectedTimelapseFiles.delete(file);
                     }
                 });
 
-                data.videos.forEach(v => {
+                data.videos.forEach((v) => {
                     const created = v.created_at ? new Date(v.created_at).toLocaleString() : "-";
                     const safeFilename = escapeHtml(v.filename);
                     const isChecked = selectedTimelapseFiles.has(v.filename);
@@ -4852,7 +4992,7 @@ $(function () {
                         checkbox.dataset.file = v.filename;
                         checkbox.checked = isChecked;
                         checkbox.setAttribute("aria-label", `Select ${v.filename}`);
-                        checkbox.addEventListener("click", event => event.stopPropagation());
+                        checkbox.addEventListener("click", (event) => event.stopPropagation());
                     }
 
                     if (currentFile && currentFile === v.filename) {
@@ -4869,7 +5009,7 @@ $(function () {
                 }
                 updateTimelapseSelectionUi();
             })
-            .catch(err => console.error("Timelapse load failed:", err));
+            .catch((err) => console.error("Timelapse load failed:", err));
     }
 
     // Load on tab show; auto-refresh every 15 s while active.
@@ -5022,9 +5162,7 @@ $(function () {
 
         if (mode === "collection") {
             confirmMessage = `Discard paused capture ${collection.label || collection.id}?`;
-            requestUrl = withActivePrinterQuery(
-                `/api/timelapse-snapshot/${encodeURIComponent(collectionId)}`
-            );
+            requestUrl = withActivePrinterQuery(`/api/timelapse-snapshot/${encodeURIComponent(collectionId)}`);
             successMessage = `Discarded paused capture ${collection.label || collection.id}.`;
         } else {
             if (!filename || !collection.allow_delete) {
@@ -5032,7 +5170,7 @@ $(function () {
             }
             confirmMessage = `Delete snapshot ${filename}?`;
             requestUrl = withActivePrinterQuery(
-                `/api/timelapse-snapshot/${encodeURIComponent(collectionId)}/${encodeURIComponent(filename)}`
+                `/api/timelapse-snapshot/${encodeURIComponent(collectionId)}/${encodeURIComponent(filename)}`,
             );
             successMessage = `Deleted snapshot ${filename}.`;
         }
@@ -5183,14 +5321,14 @@ $(function () {
                     max_videos: parseInt(tlFields.maxVideos.val(), 10) || 10,
                     save_persistent: tlFields.persistent.is(":checked"),
                     camera_source: tlFields.cameraSource.val() || "follow",
-                    light: tlFields.light.val() || null
-                }
+                    light: tlFields.light.val() || null,
+                },
             };
             try {
                 const resp = await fetch(withActivePrinterQuery("/api/settings/timelapse"), {
                     method: "POST",
                     headers: { "Content-Type": "application/json" },
-                    body: JSON.stringify(payload)
+                    body: JSON.stringify(payload),
                 });
                 if (resp.ok) {
                     flash_message("Timelapse settings saved", "success");
@@ -5260,13 +5398,13 @@ $(function () {
                     discovery_prefix: mqttFields.prefix.val().trim(),
                     ha_base_url: mqttFields.haApiBaseUrl.val().trim(),
                     ha_token: mqttFields.haApiToken.val().trim(),
-                }
+                },
             };
             try {
                 const resp = await fetch("/api/settings/mqtt", {
                     method: "POST",
                     headers: { "Content-Type": "application/json" },
-                    body: JSON.stringify(payload)
+                    body: JSON.stringify(payload),
                 });
                 if (resp.ok) {
                     flash_message("MQTT settings saved. Service restarting...", "success");
@@ -5290,7 +5428,6 @@ $(function () {
      * Only initialised when the debug tab element is present (ANKERCTL_DEV_MODE=true).
      */
     if ($("#debug").length) {
-
         // ------------------------------------------------------------------
         // Helpers
         // ------------------------------------------------------------------
@@ -5457,7 +5594,10 @@ $(function () {
                 dbgStateInterval = setInterval(dbgRefreshState, 3000);
             });
             dbgInspectorTab.addEventListener("hidden.bs.tab", function () {
-                if (dbgStateInterval) { clearInterval(dbgStateInterval); dbgStateInterval = null; }
+                if (dbgStateInterval) {
+                    clearInterval(dbgStateInterval);
+                    dbgStateInterval = null;
+                }
             });
         }
 
@@ -5478,7 +5618,7 @@ $(function () {
             await fetch("/api/debug/config", {
                 method: "POST",
                 headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({ debug_logging: enabled })
+                body: JSON.stringify({ debug_logging: enabled }),
             });
             dbgRefreshState();
         });
@@ -5492,7 +5632,7 @@ $(function () {
                 await fetch("/api/debug/simulate", {
                     method: "POST",
                     headers: { "Content-Type": "application/json" },
-                    body: JSON.stringify({ type: type, payload: payload })
+                    body: JSON.stringify({ type: type, payload: payload }),
                 });
                 dbgRefreshState();
             } catch (err) {
@@ -5559,10 +5699,13 @@ $(function () {
          */
         function serviceStateClass(state) {
             switch (state) {
-                case "Running": return "bg-success";
+                case "Running":
+                    return "bg-success";
                 case "Starting":
-                case "Stopping": return "bg-warning text-dark";
-                default: return "bg-secondary";
+                case "Stopping":
+                    return "bg-warning text-dark";
+                default:
+                    return "bg-secondary";
             }
         }
 
@@ -5570,7 +5713,9 @@ $(function () {
             try {
                 const resp = await fetch("/api/debug/services");
                 if (!resp.ok) {
-                    $("#dbg-services-grid").html(`<div class="col-12 text-danger small">Error: HTTP ${resp.status}</div>`);
+                    $("#dbg-services-grid").html(
+                        `<div class="col-12 text-danger small">Error: HTTP ${resp.status}</div>`,
+                    );
                     return;
                 }
                 const data = await resp.json();
@@ -5585,7 +5730,9 @@ $(function () {
                         const stateData = await stateResp.json();
                         isPrinting = !!(stateData.print && stateData.print.active);
                     }
-                } catch (_) { /* ignore */ }
+                } catch (_) {
+                    /* ignore */
+                }
 
                 Object.entries(data.services).forEach(([name, svc]) => {
                     const badgeClass = serviceStateClass(svc.state);
@@ -5595,7 +5742,12 @@ $(function () {
                         if (saved) {
                             const ok = saved.result === "ok";
                             const secs = Math.round((Date.now() - saved.ts) / 1000);
-                            const agoStr = secs < 60 ? `${secs}s` : secs < 3600 ? `${Math.round(secs / 60)}m` : `${Math.round(secs / 3600)}h`;
+                            const agoStr =
+                                secs < 60
+                                    ? `${secs}s`
+                                    : secs < 3600
+                                      ? `${Math.round(secs / 60)}m`
+                                      : `${Math.round(secs / 3600)}h`;
                             savedTestHtml = `<span class="${ok ? "text-success" : "text-danger"}">
                                 <i class="bi-${ok ? "check-circle" : "x-circle"}"></i>
                                 Last result: ${ok ? "ok" : "fail"} <span class="text-muted">(${agoStr} ago)</span>
@@ -5614,7 +5766,7 @@ $(function () {
                                 </div>
                                 <div class="small text-muted mb-2">
                                     <span class="me-2">Refs: ${svc.refs}</span>
-                                    <span>Wanted: <span class="${svc.wanted ? 'text-success' : 'text-danger'}">${svc.wanted}</span></span>
+                                    <span>Wanted: <span class="${svc.wanted ? "text-success" : "text-danger"}">${svc.wanted}</span></span>
                                 </div>
                                 <div class="d-grid gap-1">
                                     <button class="btn btn-sm btn-outline-warning w-100 dbg-restart-svc"
@@ -5622,11 +5774,15 @@ $(function () {
                                         data-is-printing="${isPrinting}">
                                         <i class="bi-arrow-clockwise"></i> Restart
                                     </button>
-                                    ${name === "pppp" ? `<button class="btn btn-sm btn-outline-info w-100 dbg-test-svc"
+                                    ${
+                                        name === "pppp"
+                                            ? `<button class="btn btn-sm btn-outline-info w-100 dbg-test-svc"
                                         data-svc-name="${escapeHtml(name)}">
                                         <i class="bi-wifi"></i> Test
                                     </button>
-                                    <div class="dbg-test-result small text-center" data-svc-name="${escapeHtml(name)}">${savedTestHtml}</div>` : ""}
+                                    <div class="dbg-test-result small text-center" data-svc-name="${escapeHtml(name)}">${savedTestHtml}</div>`
+                                            : ""
+                                    }
                                 </div>
                             </div>
                         </div>
@@ -5637,7 +5793,9 @@ $(function () {
                 const ts = new Date().toLocaleTimeString();
                 $("#dbg-services-refresh-indicator").text(`Last updated: ${ts}`);
             } catch (err) {
-                $("#dbg-services-grid").html(`<div class="col-12 text-danger small">Error: ${escapeHtml(String(err))}</div>`);
+                $("#dbg-services-grid").html(
+                    `<div class="col-12 text-danger small">Error: ${escapeHtml(String(err))}</div>`,
+                );
             }
         }
 
@@ -5680,16 +5838,23 @@ $(function () {
                 const data = await resp.json();
                 if (resp.ok) {
                     const ok = data.result === "ok";
-                    localStorage.setItem("pppp_test_result", JSON.stringify({ result: ok ? "ok" : "fail", ts: Date.now() }));
+                    localStorage.setItem(
+                        "pppp_test_result",
+                        JSON.stringify({ result: ok ? "ok" : "fail", ts: Date.now() }),
+                    );
                     resultDiv.html(`<span class="${ok ? "text-success" : "text-danger"}">
                         <i class="bi-${ok ? "check-circle" : "x-circle"}"></i>
                         Last result: ${ok ? "ok" : "fail"} <span class="text-muted">(just now)</span>
                     </span>`);
                     // Immediately reflect result in the main PPPP badge
                     if (ok) {
-                        $("#badge-pppp").removeClass("text-bg-danger text-bg-warning text-bg-secondary").addClass("text-bg-success");
+                        $("#badge-pppp")
+                            .removeClass("text-bg-danger text-bg-warning text-bg-secondary")
+                            .addClass("text-bg-success");
                     } else {
-                        $("#badge-pppp").removeClass("text-bg-success text-bg-warning text-bg-secondary").addClass("text-bg-danger");
+                        $("#badge-pppp")
+                            .removeClass("text-bg-success text-bg-warning text-bg-secondary")
+                            .addClass("text-bg-danger");
                     }
                 } else {
                     resultDiv.html(`<span class="text-danger small">${escapeHtml(data.error || "Error")}</span>`);
@@ -5712,7 +5877,10 @@ $(function () {
                 dbgServicesInterval = setInterval(dbgRefreshServices, 5000);
             });
             dbgServicesTab.addEventListener("hidden.bs.tab", function () {
-                if (dbgServicesInterval) { clearInterval(dbgServicesInterval); dbgServicesInterval = null; }
+                if (dbgServicesInterval) {
+                    clearInterval(dbgServicesInterval);
+                    dbgServicesInterval = null;
+                }
             });
         }
 
@@ -5764,7 +5932,7 @@ $(function () {
                 const currentVal = dbgLogFileSelect.val();
                 dbgLogFileSelect.empty();
                 $('<option value="" disabled selected>Select log file...</option>').appendTo(dbgLogFileSelect);
-                data.files.forEach(file => {
+                data.files.forEach((file) => {
                     const opt = $(`<option value="${escapeHtml(file)}">${escapeHtml(file)}</option>`);
                     if (file === currentVal) opt.prop("selected", true);
                     dbgLogFileSelect.append(opt);
@@ -5786,24 +5954,22 @@ $(function () {
             let filtered = _rawLogLines;
 
             if (levelFilter) {
-                filtered = filtered.filter(line => line.toUpperCase().includes(levelFilter));
+                filtered = filtered.filter((line) => line.toUpperCase().includes(levelFilter));
             }
             if (searchTerm) {
-                filtered = filtered.filter(line => line.toLowerCase().includes(searchLower));
+                filtered = filtered.filter((line) => line.toLowerCase().includes(searchLower));
             }
 
             dbgLogCount.textContent = `${filtered.length} / ${_rawLogLines.length} lines`;
 
             if (!searchTerm) {
                 // No search — just escape and join
-                dbgLogContent.innerHTML = filtered.map(l => escapeHtml(l)).join("\n");
+                dbgLogContent.innerHTML = filtered.map((l) => escapeHtml(l)).join("\n");
             } else {
                 // Highlight search term with <mark>
                 const escapedSearch = searchTerm.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
                 const re = new RegExp(`(${escapedSearch})`, "gi");
-                dbgLogContent.innerHTML = filtered
-                    .map(l => escapeHtml(l).replace(re, "<mark>$1</mark>"))
-                    .join("\n");
+                dbgLogContent.innerHTML = filtered.map((l) => escapeHtml(l).replace(re, "<mark>$1</mark>")).join("\n");
             }
 
             // Auto-scroll to bottom only when the user is already near the bottom,
@@ -5820,7 +5986,7 @@ $(function () {
             const filename = dbgLogFileSelect.val();
             if (!filename) return;
             try {
-                const lines = dbgLogLinesInput ? (parseInt(dbgLogLinesInput.value, 10) || 500) : 500;
+                const lines = dbgLogLinesInput ? parseInt(dbgLogLinesInput.value, 10) || 500 : 500;
                 const resp = await fetch(`/api/debug/logs/${encodeURIComponent(filename)}?lines=${lines}`);
                 if (resp.ok) {
                     const data = await resp.json();
@@ -5855,7 +6021,10 @@ $(function () {
                     dbgLoadLogContent();
                     dbgLogRefreshInterval = setInterval(dbgLoadLogContent, 5000);
                 } else {
-                    if (dbgLogRefreshInterval) { clearInterval(dbgLogRefreshInterval); dbgLogRefreshInterval = null; }
+                    if (dbgLogRefreshInterval) {
+                        clearInterval(dbgLogRefreshInterval);
+                        dbgLogRefreshInterval = null;
+                    }
                 }
             });
         }
@@ -5863,8 +6032,14 @@ $(function () {
         // Clean up intervals when leaving the Debug tab
         if (mainDebugTabBtn) {
             mainDebugTabBtn.addEventListener("hidden.bs.tab", function () {
-                if (dbgStateInterval) { clearInterval(dbgStateInterval); dbgStateInterval = null; }
-                if (dbgServicesInterval) { clearInterval(dbgServicesInterval); dbgServicesInterval = null; }
+                if (dbgStateInterval) {
+                    clearInterval(dbgStateInterval);
+                    dbgStateInterval = null;
+                }
+                if (dbgServicesInterval) {
+                    clearInterval(dbgServicesInterval);
+                    dbgServicesInterval = null;
+                }
                 if (dbgLogRefreshInterval) {
                     clearInterval(dbgLogRefreshInterval);
                     dbgLogRefreshInterval = null;
@@ -5885,7 +6060,7 @@ $(function () {
             statusEl.innerHTML =
                 '<div class="alert alert-info py-2 small mb-0">' +
                 '<span class="spinner-border spinner-border-sm me-2" role="status"></span>' +
-                'Sending M420 V — waiting for printer response (up to 15 s)...</div>';
+                "Sending M420 V — waiting for printer response (up to 15 s)...</div>";
             gridEl.style.display = "none";
             if (btn) btn.disabled = true;
 
@@ -5966,7 +6141,7 @@ $(function () {
                 if (navigator.clipboard && navigator.clipboard.writeText) {
                     navigator.clipboard.writeText(text).then(
                         () => showResult(true, "navigator.clipboard"),
-                        () => showResult(false, "navigator.clipboard")
+                        () => showResult(false, "navigator.clipboard"),
                     );
                 } else {
                     const ok = execFallback(text);
@@ -5987,16 +6162,40 @@ $(function () {
             document.getElementById("dbg-cam-fake-printer-only")?.addEventListener("click", function () {
                 const pi = getActivePrinterIndex();
                 const base = "http://" + host;
-                window._dbg.applyCameraSettings({ integration: { enabled: true, stream_url: base + "/api/camera/stream?printer_index=" + pi, snapshot_url: base + "/api/snapshot?printer_index=" + pi, api_key_required: false } });
-                if (camResultEl) camResultEl.innerHTML = "<span class=\"text-success\">Simulated printer-only (printer_index=" + pi + "). Check Setup \u2192 Camera for a single Stream URL.</span>";
+                window._dbg.applyCameraSettings({
+                    integration: {
+                        enabled: true,
+                        stream_url: base + "/api/camera/stream?printer_index=" + pi,
+                        snapshot_url: base + "/api/snapshot?printer_index=" + pi,
+                        api_key_required: false,
+                    },
+                });
+                if (camResultEl)
+                    camResultEl.innerHTML =
+                        '<span class="text-success">Simulated printer-only (printer_index=' +
+                        pi +
+                        "). Check Setup \u2192 Camera for a single Stream URL.</span>";
             });
 
             document.getElementById("dbg-cam-fake-both")?.addEventListener("click", function () {
                 const pi = getActivePrinterIndex();
                 const base = "http://" + host;
                 const q = "?printer_index=" + pi;
-                window._dbg.applyCameraSettings({ integration: { enabled: true, stream_url: base + "/api/camera/stream" + q, snapshot_url: base + "/api/snapshot" + q, printer_stream_url: base + "/api/camera/stream" + q + "&source=printer", external_stream_url: base + "/api/camera/stream" + q + "&source=external", api_key_required: false } });
-                if (camResultEl) camResultEl.innerHTML = "<span class=\"text-success\">Simulated printer + external (printer_index=" + pi + "). Check Setup \u2192 Camera for both source URLs.</span>";
+                window._dbg.applyCameraSettings({
+                    integration: {
+                        enabled: true,
+                        stream_url: base + "/api/camera/stream" + q,
+                        snapshot_url: base + "/api/snapshot" + q,
+                        printer_stream_url: base + "/api/camera/stream" + q + "&source=printer",
+                        external_stream_url: base + "/api/camera/stream" + q + "&source=external",
+                        api_key_required: false,
+                    },
+                });
+                if (camResultEl)
+                    camResultEl.innerHTML =
+                        '<span class="text-success">Simulated printer + external (printer_index=' +
+                        pi +
+                        "). Check Setup \u2192 Camera for both source URLs.</span>";
             });
 
             document.getElementById("dbg-cam-fake-clear")?.addEventListener("click", function () {
@@ -6004,7 +6203,6 @@ $(function () {
                 if (camResultEl) camResultEl.textContent = "";
             });
         })();
-
     } // end debug tab block
 
     /**
@@ -6015,91 +6213,93 @@ $(function () {
 
     function filamentToggleScarf() {
         const enabled = document.getElementById("filament-scarf-enabled");
-        const opts    = document.getElementById("filament-scarf-opts");
+        const opts = document.getElementById("filament-scarf-opts");
         if (enabled && opts) opts.style.display = enabled.checked ? "" : "none";
     }
 
     function filamentToggleWipe() {
         const enabled = document.getElementById("filament-wipe-enabled");
-        const opts    = document.getElementById("filament-wipe-opts");
+        const opts = document.getElementById("filament-wipe-opts");
         if (enabled && opts) opts.style.display = enabled.checked ? "" : "none";
     }
 
     function filamentReadForm() {
         return {
-            name:                    document.getElementById("filament-name").value.trim(),
-            brand:                   document.getElementById("filament-brand").value.trim(),
-            material:                document.getElementById("filament-material").value.trim(),
-            color:                   document.getElementById("filament-color").value,
+            name: document.getElementById("filament-name").value.trim(),
+            brand: document.getElementById("filament-brand").value.trim(),
+            material: document.getElementById("filament-material").value.trim(),
+            color: document.getElementById("filament-color").value,
             nozzle_temp_other_layer: parseInt(document.getElementById("filament-nozzle-temp-other").value, 10) || 0,
             nozzle_temp_first_layer: parseInt(document.getElementById("filament-nozzle-temp-first").value, 10) || 0,
-            bed_temp_other_layer:    parseInt(document.getElementById("filament-bed-temp-other").value, 10) || 0,
-            bed_temp_first_layer:    parseInt(document.getElementById("filament-bed-temp-first").value, 10) || 0,
-            flow_rate:               parseFloat(document.getElementById("filament-flow-rate").value) || 1.0,
-            filament_diameter:       parseFloat(document.getElementById("filament-diameter").value) || 1.75,
-            pressure_advance:        parseFloat(document.getElementById("filament-pressure-advance").value) || 0,
-            max_volumetric_speed:    parseFloat(document.getElementById("filament-max-vol-speed").value) || 0,
-            travel_speed:            parseInt(document.getElementById("filament-travel-speed").value, 10) || 0,
-            perimeter_speed:         parseInt(document.getElementById("filament-perimeter-speed").value, 10) || 0,
-            infill_speed:            parseInt(document.getElementById("filament-infill-speed").value, 10) || 0,
-            cooling_enabled:         document.getElementById("filament-cooling-enabled").checked ? 1 : 0,
-            cooling_min_fan_speed:   parseInt(document.getElementById("filament-cooling-min").value, 10) || 0,
-            cooling_max_fan_speed:   parseInt(document.getElementById("filament-cooling-max").value, 10) || 100,
-            seam_position:           document.getElementById("filament-seam-position").value,
-            seam_gap:                parseFloat(document.getElementById("filament-seam-gap").value) || 0,
-            scarf_enabled:           document.getElementById("filament-scarf-enabled").checked ? 1 : 0,
-            scarf_conditional:       document.getElementById("filament-scarf-conditional").checked ? 1 : 0,
-            scarf_angle_threshold:   parseInt(document.getElementById("filament-scarf-angle").value, 10) || 155,
-            scarf_length:            parseFloat(document.getElementById("filament-scarf-length").value) || 20.0,
-            scarf_steps:             parseInt(document.getElementById("filament-scarf-steps").value, 10) || 10,
-            scarf_speed:             parseInt(document.getElementById("filament-scarf-speed").value, 10) || 100,
-            retract_length:          parseFloat(document.getElementById("filament-retract-length").value) || 0,
-            retract_speed:           parseInt(document.getElementById("filament-retract-speed").value, 10) || 45,
-            retract_lift_z:          parseFloat(document.getElementById("filament-retract-lift-z").value) || 0,
-            wipe_enabled:            document.getElementById("filament-wipe-enabled").checked ? 1 : 0,
-            wipe_distance:           parseFloat(document.getElementById("filament-wipe-distance").value) || 1.5,
-            wipe_speed:              parseInt(document.getElementById("filament-wipe-speed").value, 10) || 40,
-            wipe_retract_before:     document.getElementById("filament-wipe-retract-before").checked ? 1 : 0,
-            notes:                   document.getElementById("filament-notes").value.trim(),
+            bed_temp_other_layer: parseInt(document.getElementById("filament-bed-temp-other").value, 10) || 0,
+            bed_temp_first_layer: parseInt(document.getElementById("filament-bed-temp-first").value, 10) || 0,
+            flow_rate: parseFloat(document.getElementById("filament-flow-rate").value) || 1.0,
+            filament_diameter: parseFloat(document.getElementById("filament-diameter").value) || 1.75,
+            pressure_advance: parseFloat(document.getElementById("filament-pressure-advance").value) || 0,
+            max_volumetric_speed: parseFloat(document.getElementById("filament-max-vol-speed").value) || 0,
+            travel_speed: parseInt(document.getElementById("filament-travel-speed").value, 10) || 0,
+            perimeter_speed: parseInt(document.getElementById("filament-perimeter-speed").value, 10) || 0,
+            infill_speed: parseInt(document.getElementById("filament-infill-speed").value, 10) || 0,
+            cooling_enabled: document.getElementById("filament-cooling-enabled").checked ? 1 : 0,
+            cooling_min_fan_speed: parseInt(document.getElementById("filament-cooling-min").value, 10) || 0,
+            cooling_max_fan_speed: parseInt(document.getElementById("filament-cooling-max").value, 10) || 100,
+            seam_position: document.getElementById("filament-seam-position").value,
+            seam_gap: parseFloat(document.getElementById("filament-seam-gap").value) || 0,
+            scarf_enabled: document.getElementById("filament-scarf-enabled").checked ? 1 : 0,
+            scarf_conditional: document.getElementById("filament-scarf-conditional").checked ? 1 : 0,
+            scarf_angle_threshold: parseInt(document.getElementById("filament-scarf-angle").value, 10) || 155,
+            scarf_length: parseFloat(document.getElementById("filament-scarf-length").value) || 20.0,
+            scarf_steps: parseInt(document.getElementById("filament-scarf-steps").value, 10) || 10,
+            scarf_speed: parseInt(document.getElementById("filament-scarf-speed").value, 10) || 100,
+            retract_length: parseFloat(document.getElementById("filament-retract-length").value) || 0,
+            retract_speed: parseInt(document.getElementById("filament-retract-speed").value, 10) || 45,
+            retract_lift_z: parseFloat(document.getElementById("filament-retract-lift-z").value) || 0,
+            wipe_enabled: document.getElementById("filament-wipe-enabled").checked ? 1 : 0,
+            wipe_distance: parseFloat(document.getElementById("filament-wipe-distance").value) || 1.5,
+            wipe_speed: parseInt(document.getElementById("filament-wipe-speed").value, 10) || 40,
+            wipe_retract_before: document.getElementById("filament-wipe-retract-before").checked ? 1 : 0,
+            notes: document.getElementById("filament-notes").value.trim(),
         };
     }
 
     function filamentFillForm(p) {
-        document.getElementById("filament-id").value                       = p.id || "";
-        document.getElementById("filament-name").value                     = p.name || "";
-        document.getElementById("filament-brand").value                    = p.brand || "";
-        document.getElementById("filament-material").value                 = p.material || "";
-        document.getElementById("filament-color").value                    = p.color || "#FFFFFF";
-        document.getElementById("filament-nozzle-temp-other").value        = p.nozzle_temp_other_layer ?? p.nozzle_temp ?? 220;
-        document.getElementById("filament-nozzle-temp-first").value        = p.nozzle_temp_first_layer ?? (p.nozzle_temp_other_layer ?? p.nozzle_temp ?? 220) + 5;
-        document.getElementById("filament-bed-temp-other").value           = p.bed_temp_other_layer ?? p.bed_temp ?? 60;
-        document.getElementById("filament-bed-temp-first").value           = p.bed_temp_first_layer ?? (p.bed_temp_other_layer ?? p.bed_temp ?? 60) + 5;
-        document.getElementById("filament-flow-rate").value                = p.flow_rate ?? 1.0;
-        document.getElementById("filament-diameter").value                 = p.filament_diameter ?? 1.75;
-        document.getElementById("filament-pressure-advance").value         = p.pressure_advance ?? 0;
-        document.getElementById("filament-max-vol-speed").value            = p.max_volumetric_speed ?? 15;
-        document.getElementById("filament-travel-speed").value             = p.travel_speed ?? 120;
-        document.getElementById("filament-perimeter-speed").value          = p.perimeter_speed ?? 60;
-        document.getElementById("filament-infill-speed").value             = p.infill_speed ?? 80;
-        document.getElementById("filament-cooling-enabled").checked        = !!p.cooling_enabled;
-        document.getElementById("filament-cooling-min").value              = p.cooling_min_fan_speed ?? 0;
-        document.getElementById("filament-cooling-max").value              = p.cooling_max_fan_speed ?? 100;
-        document.getElementById("filament-seam-position").value            = p.seam_position || "aligned";
-        document.getElementById("filament-seam-gap").value                 = p.seam_gap ?? 0;
-        document.getElementById("filament-scarf-enabled").checked          = !!p.scarf_enabled;
-        document.getElementById("filament-scarf-conditional").checked      = !!p.scarf_conditional;
-        document.getElementById("filament-scarf-angle").value              = p.scarf_angle_threshold ?? 155;
-        document.getElementById("filament-scarf-length").value             = p.scarf_length ?? 20;
-        document.getElementById("filament-scarf-steps").value              = p.scarf_steps ?? 10;
-        document.getElementById("filament-scarf-speed").value              = p.scarf_speed ?? 100;
-        document.getElementById("filament-retract-length").value           = p.retract_length ?? 0.8;
-        document.getElementById("filament-retract-speed").value            = p.retract_speed ?? 45;
-        document.getElementById("filament-retract-lift-z").value           = p.retract_lift_z ?? 0;
-        document.getElementById("filament-wipe-enabled").checked           = !!p.wipe_enabled;
-        document.getElementById("filament-wipe-distance").value            = p.wipe_distance ?? 1.5;
-        document.getElementById("filament-wipe-speed").value               = p.wipe_speed ?? 40;
-        document.getElementById("filament-wipe-retract-before").checked    = !!p.wipe_retract_before;
-        document.getElementById("filament-notes").value                    = p.notes || "";
+        document.getElementById("filament-id").value = p.id || "";
+        document.getElementById("filament-name").value = p.name || "";
+        document.getElementById("filament-brand").value = p.brand || "";
+        document.getElementById("filament-material").value = p.material || "";
+        document.getElementById("filament-color").value = p.color || "#FFFFFF";
+        document.getElementById("filament-nozzle-temp-other").value = p.nozzle_temp_other_layer ?? p.nozzle_temp ?? 220;
+        document.getElementById("filament-nozzle-temp-first").value =
+            p.nozzle_temp_first_layer ?? (p.nozzle_temp_other_layer ?? p.nozzle_temp ?? 220) + 5;
+        document.getElementById("filament-bed-temp-other").value = p.bed_temp_other_layer ?? p.bed_temp ?? 60;
+        document.getElementById("filament-bed-temp-first").value =
+            p.bed_temp_first_layer ?? (p.bed_temp_other_layer ?? p.bed_temp ?? 60) + 5;
+        document.getElementById("filament-flow-rate").value = p.flow_rate ?? 1.0;
+        document.getElementById("filament-diameter").value = p.filament_diameter ?? 1.75;
+        document.getElementById("filament-pressure-advance").value = p.pressure_advance ?? 0;
+        document.getElementById("filament-max-vol-speed").value = p.max_volumetric_speed ?? 15;
+        document.getElementById("filament-travel-speed").value = p.travel_speed ?? 120;
+        document.getElementById("filament-perimeter-speed").value = p.perimeter_speed ?? 60;
+        document.getElementById("filament-infill-speed").value = p.infill_speed ?? 80;
+        document.getElementById("filament-cooling-enabled").checked = !!p.cooling_enabled;
+        document.getElementById("filament-cooling-min").value = p.cooling_min_fan_speed ?? 0;
+        document.getElementById("filament-cooling-max").value = p.cooling_max_fan_speed ?? 100;
+        document.getElementById("filament-seam-position").value = p.seam_position || "aligned";
+        document.getElementById("filament-seam-gap").value = p.seam_gap ?? 0;
+        document.getElementById("filament-scarf-enabled").checked = !!p.scarf_enabled;
+        document.getElementById("filament-scarf-conditional").checked = !!p.scarf_conditional;
+        document.getElementById("filament-scarf-angle").value = p.scarf_angle_threshold ?? 155;
+        document.getElementById("filament-scarf-length").value = p.scarf_length ?? 20;
+        document.getElementById("filament-scarf-steps").value = p.scarf_steps ?? 10;
+        document.getElementById("filament-scarf-speed").value = p.scarf_speed ?? 100;
+        document.getElementById("filament-retract-length").value = p.retract_length ?? 0.8;
+        document.getElementById("filament-retract-speed").value = p.retract_speed ?? 45;
+        document.getElementById("filament-retract-lift-z").value = p.retract_lift_z ?? 0;
+        document.getElementById("filament-wipe-enabled").checked = !!p.wipe_enabled;
+        document.getElementById("filament-wipe-distance").value = p.wipe_distance ?? 1.5;
+        document.getElementById("filament-wipe-speed").value = p.wipe_speed ?? 40;
+        document.getElementById("filament-wipe-retract-before").checked = !!p.wipe_retract_before;
+        document.getElementById("filament-notes").value = p.notes || "";
         // Sync conditional sub-section visibility
         filamentToggleScarf();
         filamentToggleWipe();
@@ -6142,7 +6342,7 @@ $(function () {
     function filamentFindProfileById(profileId) {
         const id = parseInt(profileId, 10);
         if (!Number.isFinite(id)) return null;
-        return _filamentAllProfiles.find(p => parseInt(p.id, 10) === id) || null;
+        return _filamentAllProfiles.find((p) => parseInt(p.id, 10) === id) || null;
     }
 
     function renderFilamentServiceTemps() {
@@ -6218,7 +6418,7 @@ $(function () {
         if (!select) return;
         const previous = String(selectedValue || select.value || "");
         select.innerHTML = '<option value="">Select profile...</option>';
-        _filamentAllProfiles.forEach(p => {
+        _filamentAllProfiles.forEach((p) => {
             const option = document.createElement("option");
             option.value = String(p.id);
             const temp = filamentServiceTemp(p);
@@ -6244,7 +6444,7 @@ $(function () {
             "filament-swap-unload-length",
             "filament-swap-load-length",
             "filament-swap-home-pause",
-        ].forEach(id => {
+        ].forEach((id) => {
             const el = document.getElementById(id);
             if (el) el.disabled = !legacyEnabled;
         });
@@ -6253,10 +6453,10 @@ $(function () {
         if (!stateEl || _filamentSwapToken) return;
 
         if (legacyEnabled) {
-            stateEl.textContent = "Guided automatic swap enabled. Start Swap will heat, home, raise Z, prime, retract, and then wait for you to load the new filament.";
-        } else {
             stateEl.textContent =
-                `Recommended guided swap enabled. Start Swap will preheat to ${_filamentSwapSettings.manual_swap_preheat_temp_c}°C and wait for a manual filament change.`;
+                "Guided automatic swap enabled. Start Swap will heat, home, raise Z, prime, retract, and then wait for you to load the new filament.";
+        } else {
+            stateEl.textContent = `Recommended guided swap enabled. Start Swap will preheat to ${_filamentSwapSettings.manual_swap_preheat_temp_c}°C and wait for a manual filament change.`;
         }
     }
 
@@ -6265,7 +6465,10 @@ $(function () {
             const resp = await fetch("/api/settings/filament-service");
             const data = await resp.json();
             if (!resp.ok) {
-                filamentSetSwapSettingsStatus(data.error || `Failed to load swap settings (HTTP ${resp.status})`, "danger");
+                filamentSetSwapSettingsStatus(
+                    data.error || `Failed to load swap settings (HTTP ${resp.status})`,
+                    "danger",
+                );
                 return;
             }
             _filamentSwapSettings = data.filament_service || _filamentSwapSettings;
@@ -6288,7 +6491,7 @@ $(function () {
                 _filamentSwapSettings.allow_legacy_swap
                     ? "Guided automatic swap is enabled."
                     : "Recommended manual swap is enabled.",
-                "muted"
+                "muted",
             );
         } catch (err) {
             filamentSetSwapSettingsStatus(`Failed to load swap settings: ${err}`, "danger");
@@ -6345,7 +6548,17 @@ $(function () {
         const swap = data && data.pending ? data.swap : null;
         const previousSwapToken = _filamentSwapToken;
         const previousSwapMode = _filamentSwapMode;
-        const running = swap && ["homing", "heating_unload", "priming_unload", "unloading", "heating_load", "loading", "cooling_down"].includes(swap.phase);
+        const running =
+            swap &&
+            [
+                "homing",
+                "heating_unload",
+                "priming_unload",
+                "unloading",
+                "heating_load",
+                "loading",
+                "cooling_down",
+            ].includes(swap.phase);
 
         _filamentSwapToken = swap ? swap.token : null;
         _filamentSwapMode = swap ? swap.mode : null;
@@ -6364,11 +6577,11 @@ $(function () {
         if (!stateEl) return;
         if (!swap) {
             if (previousSwapToken) {
-                const message = data?.message || (
-                    previousSwapMode === "legacy"
+                const message =
+                    data?.message ||
+                    (previousSwapMode === "legacy"
                         ? "Filament changed. Nozzle heater turned off."
-                        : "Manual filament swap complete."
-                );
+                        : "Manual filament swap complete.");
                 filamentSetSwapStateMessage(message);
                 filamentSetServiceStatus(message, previousSwapMode === "legacy" ? "success" : "secondary");
             } else {
@@ -6378,34 +6591,45 @@ $(function () {
         }
 
         if (swap.mode === "manual") {
-            stateEl.textContent = swap.message ||
-                `Manual swap pending. Nozzle preheating to ${swap.manual_swap_preheat_temp_c}°C.`;
+            stateEl.textContent =
+                swap.message || `Manual swap pending. Nozzle preheating to ${swap.manual_swap_preheat_temp_c}°C.`;
             return;
         }
 
-        stateEl.textContent = swap.message ||
+        stateEl.textContent =
+            swap.message ||
             `Pending swap: unload ${swap.unload_profile_name} (${swap.unload_length_mm} mm @ ${swap.unload_temp_c}°C), ` +
-            `then load ${swap.load_profile_name} (${swap.load_length_mm} mm @ ${swap.load_temp_c}°C).`;
+                `then load ${swap.load_profile_name} (${swap.load_length_mm} mm @ ${swap.load_temp_c}°C).`;
     }
 
     async function filamentRefreshSwapState() {
         try {
-            const data = await filamentJsonRequest(withActivePrinterQuery("/api/filaments/service/swap"), {}, "Failed to load swap state");
+            const data = await filamentJsonRequest(
+                withActivePrinterQuery("/api/filaments/service/swap"),
+                {},
+                "Failed to load swap state",
+            );
             filamentUpdateSwapState(data);
         } catch (err) {
             console.warn("Filament swap state refresh failed:", err);
             if (_filamentSwapToken) {
-                filamentSetSwapStateMessage(`Swap status refresh failed: ${err.message}. The last known state may be stale.`);
+                filamentSetSwapStateMessage(
+                    `Swap status refresh failed: ${err.message}. The last known state may be stale.`,
+                );
             }
         }
     }
 
     async function filamentServiceRequest(url, payload) {
-        return filamentJsonRequest(withActivePrinterQuery(url), {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify(payload || {}),
-        }, "Filament service request failed");
+        return filamentJsonRequest(
+            withActivePrinterQuery(url),
+            {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify(payload || {}),
+            },
+            "Filament service request failed",
+        );
     }
 
     function _renderFilaments() {
@@ -6414,10 +6638,11 @@ $(function () {
         const query = (document.getElementById("filament-search")?.value || "").toLowerCase().trim();
         let profiles = _filamentAllProfiles.slice();
         if (query) {
-            profiles = profiles.filter(p =>
-                (p.name || "").toLowerCase().includes(query) ||
-                (p.material || "").toLowerCase().includes(query) ||
-                (p.brand || "").toLowerCase().includes(query)
+            profiles = profiles.filter(
+                (p) =>
+                    (p.name || "").toLowerCase().includes(query) ||
+                    (p.material || "").toLowerCase().includes(query) ||
+                    (p.brand || "").toLowerCase().includes(query),
             );
         }
         profiles.sort((a, b) => {
@@ -6429,15 +6654,15 @@ $(function () {
             return;
         }
         tbody.innerHTML = "";
-        profiles.forEach(p => {
-                    const safeName     = escapeHtml(p.name);
-                    const safeMaterial = escapeHtml(p.material || "");
-                    const safeBrand    = escapeHtml(p.brand || "");
-                    const safeId       = parseInt(p.id, 10);
-                    const dotColor     = escapeHtml(p.color || "#FFFFFF");
-                    const colorDot     = `<span style="display:inline-block;width:1.1rem;height:1.1rem;border-radius:50%;background:${dotColor};border:1px solid #aaa;vertical-align:middle;box-shadow:inset 0 0 0 1px rgba(0,0,0,0.08);"></span>`;
-                    const tr = document.createElement("tr");
-                    tr.innerHTML = `
+        profiles.forEach((p) => {
+            const safeName = escapeHtml(p.name);
+            const safeMaterial = escapeHtml(p.material || "");
+            const safeBrand = escapeHtml(p.brand || "");
+            const safeId = parseInt(p.id, 10);
+            const dotColor = escapeHtml(p.color || "#FFFFFF");
+            const colorDot = `<span style="display:inline-block;width:1.1rem;height:1.1rem;border-radius:50%;background:${dotColor};border:1px solid #aaa;vertical-align:middle;box-shadow:inset 0 0 0 1px rgba(0,0,0,0.08);"></span>`;
+            const tr = document.createElement("tr");
+            tr.innerHTML = `
                         <td class="text-center">${colorDot}</td>
                         <td class="fw-semibold">${safeName}</td>
                         <td>${safeMaterial}</td>
@@ -6461,40 +6686,55 @@ $(function () {
                                 </button>
                             </div>
                         </td>`;
-                    tr.querySelector(".filament-edit").addEventListener("click", () => filamentOpenEdit(p));
-                    tr.querySelector(".filament-duplicate").addEventListener("click", async () => {
-                        try {
-                            await filamentJsonRequest(`/api/filaments/${safeId}/duplicate`, { method: "POST" }, "Failed to duplicate filament profile");
-                            await loadFilaments();
-                            flash_message(`Created a copy of "${p.name}".`, "success");
-                        } catch (err) {
-                            flash_message(`Duplicate failed: ${err.message}`, "danger");
-                        }
-                    });
-                    tr.querySelector(".filament-preheat").addEventListener("click", async () => {
-                        const nozzle = p.nozzle_temp_first_layer ?? p.nozzle_temp_other_layer ?? p.nozzle_temp ?? "?";
-                        const bed    = p.bed_temp_first_layer ?? p.bed_temp_other_layer ?? p.bed_temp ?? "?";
-                        if (!confirm(`Preheat printer for ${p.name}?\nNozzle: ${nozzle}°C, Bed: ${bed}°C`)) return;
-                        try {
-                            await filamentJsonRequest(withActivePrinterQuery(`/api/filaments/${safeId}/apply`), { method: "POST" }, "Failed to preheat filament profile");
-                            filamentSetServiceStatus(`Preheating ${p.name}: nozzle ${nozzle}\u00B0C, bed ${bed}\u00B0C.`, "warning");
-                        } catch (err) {
-                            filamentSetServiceStatus(`Preheat failed: ${err.message}`, "danger");
-                            flash_message(`Preheat failed: ${err.message}`, "danger");
-                        }
-                    });
-                    tr.querySelector(".filament-delete").addEventListener("click", async () => {
-                        if (!confirm(`Delete filament profile "${p.name}"?`)) return;
-                        try {
-                            await filamentJsonRequest(`/api/filaments/${safeId}`, { method: "DELETE" }, "Failed to delete filament profile");
-                            await loadFilaments();
-                            flash_message(`Deleted filament profile "${p.name}".`, "success");
-                        } catch (err) {
-                            flash_message(`Delete failed: ${err.message}`, "danger");
-                        }
-                    });
-                    tbody.appendChild(tr);
-                });
+            tr.querySelector(".filament-edit").addEventListener("click", () => filamentOpenEdit(p));
+            tr.querySelector(".filament-duplicate").addEventListener("click", async () => {
+                try {
+                    await filamentJsonRequest(
+                        `/api/filaments/${safeId}/duplicate`,
+                        { method: "POST" },
+                        "Failed to duplicate filament profile",
+                    );
+                    await loadFilaments();
+                    flash_message(`Created a copy of "${p.name}".`, "success");
+                } catch (err) {
+                    flash_message(`Duplicate failed: ${err.message}`, "danger");
+                }
+            });
+            tr.querySelector(".filament-preheat").addEventListener("click", async () => {
+                const nozzle = p.nozzle_temp_first_layer ?? p.nozzle_temp_other_layer ?? p.nozzle_temp ?? "?";
+                const bed = p.bed_temp_first_layer ?? p.bed_temp_other_layer ?? p.bed_temp ?? "?";
+                if (!confirm(`Preheat printer for ${p.name}?\nNozzle: ${nozzle}°C, Bed: ${bed}°C`)) return;
+                try {
+                    await filamentJsonRequest(
+                        withActivePrinterQuery(`/api/filaments/${safeId}/apply`),
+                        { method: "POST" },
+                        "Failed to preheat filament profile",
+                    );
+                    filamentSetServiceStatus(
+                        `Preheating ${p.name}: nozzle ${nozzle}\u00B0C, bed ${bed}\u00B0C.`,
+                        "warning",
+                    );
+                } catch (err) {
+                    filamentSetServiceStatus(`Preheat failed: ${err.message}`, "danger");
+                    flash_message(`Preheat failed: ${err.message}`, "danger");
+                }
+            });
+            tr.querySelector(".filament-delete").addEventListener("click", async () => {
+                if (!confirm(`Delete filament profile "${p.name}"?`)) return;
+                try {
+                    await filamentJsonRequest(
+                        `/api/filaments/${safeId}`,
+                        { method: "DELETE" },
+                        "Failed to delete filament profile",
+                    );
+                    await loadFilaments();
+                    flash_message(`Deleted filament profile "${p.name}".`, "success");
+                } catch (err) {
+                    flash_message(`Delete failed: ${err.message}`, "danger");
+                }
+            });
+            tbody.appendChild(tr);
+        });
     }
 
     async function loadFilaments() {
@@ -6534,7 +6774,9 @@ $(function () {
     // Search input
     const filamentSearch = document.getElementById("filament-search");
     if (filamentSearch) {
-        filamentSearch.addEventListener("input", function () { _renderFilaments(); });
+        filamentSearch.addEventListener("input", function () {
+            _renderFilaments();
+        });
     }
 
     const filamentServiceProfile = document.getElementById("filament-service-profile");
@@ -6554,10 +6796,7 @@ $(function () {
                 const res = await filamentServiceRequest("/api/filaments/service/preheat", {
                     profile_id: parseInt(profileId, 10),
                 });
-                filamentSetServiceStatus(
-                    `Preheating ${res.profile_name} to ${res.target_temp_c}°C.`,
-                    "warning"
-                );
+                filamentSetServiceStatus(`Preheating ${res.profile_name} to ${res.target_temp_c}°C.`, "warning");
             } catch (err) {
                 filamentSetServiceStatus(`Preheat failed: ${err.message}`, "danger");
             }
@@ -6581,7 +6820,7 @@ $(function () {
                 });
                 filamentSetServiceStatus(
                     `Extruding ${res.length_mm} mm with ${res.profile_name} at ${res.target_temp_c}°C.`,
-                    "success"
+                    "success",
                 );
             } catch (err) {
                 filamentSetServiceStatus(`Extrude failed: ${err.message}`, "danger");
@@ -6606,7 +6845,7 @@ $(function () {
                 });
                 filamentSetServiceStatus(
                     `Retracting ${res.length_mm} mm with ${res.profile_name} at ${res.target_temp_c}°C.`,
-                    "secondary"
+                    "secondary",
                 );
             } catch (err) {
                 filamentSetServiceStatus(`Retract failed: ${err.message}`, "danger");
@@ -6635,17 +6874,31 @@ $(function () {
                     manual_swap_preheat_temp_c: manualTempC,
                 };
                 if (legacyEnabled) {
-                    const unloadProfileId = parseInt(document.getElementById("filament-swap-unload-profile")?.value || "", 10);
-                    const loadProfileId = parseInt(document.getElementById("filament-swap-load-profile")?.value || "", 10);
-                    const primeLengthMm = parseFloat(document.getElementById("filament-swap-prime-length")?.value || "0");
-                    const unloadLengthMm = parseFloat(document.getElementById("filament-swap-unload-length")?.value || "0");
+                    const unloadProfileId = parseInt(
+                        document.getElementById("filament-swap-unload-profile")?.value || "",
+                        10,
+                    );
+                    const loadProfileId = parseInt(
+                        document.getElementById("filament-swap-load-profile")?.value || "",
+                        10,
+                    );
+                    const primeLengthMm = parseFloat(
+                        document.getElementById("filament-swap-prime-length")?.value || "0",
+                    );
+                    const unloadLengthMm = parseFloat(
+                        document.getElementById("filament-swap-unload-length")?.value || "0",
+                    );
                     const loadLengthMm = parseFloat(document.getElementById("filament-swap-load-length")?.value || "0");
                     const homePauseS = parseFloat(document.getElementById("filament-swap-home-pause")?.value || "70");
                     if (!Number.isFinite(unloadProfileId) || !Number.isFinite(loadProfileId)) {
                         filamentSetServiceStatus("Select unload and load profiles first.", "warning");
                         return;
                     }
-                    if (!window.confirm("Guided automatic swap will home the printer first. Make sure the bed and toolhead path are clear before starting.")) {
+                    if (
+                        !window.confirm(
+                            "Guided automatic swap will home the printer first. Make sure the bed and toolhead path are clear before starting.",
+                        )
+                    ) {
                         return;
                     }
                     payload = {
@@ -6662,7 +6915,7 @@ $(function () {
                     legacyEnabled
                         ? "Guided automatic swap started. Heating, homing, and raising Z before unload..."
                         : `Recommended guided swap started. Preheating to ${manualTempC}°C...`,
-                    "warning"
+                    "warning",
                 );
                 const res = await filamentServiceRequest("/api/filaments/service/swap/start", payload);
                 filamentUpdateSwapState(res);
@@ -6687,10 +6940,7 @@ $(function () {
                     token: _filamentSwapToken,
                 });
                 filamentUpdateSwapState(res);
-                filamentSetServiceStatus(
-                    res.message,
-                    res.pending ? "warning" : "success"
-                );
+                filamentSetServiceStatus(res.message, res.pending ? "warning" : "success");
             } catch (err) {
                 filamentSetServiceStatus(`Swap confirm failed: ${err.message}`, "danger");
             }
@@ -6779,7 +7029,7 @@ $(function () {
     if (filamentSaveBtn) {
         filamentSaveBtn.addEventListener("click", async function () {
             const profileId = document.getElementById("filament-id").value;
-            const payload   = filamentReadForm();
+            const payload = filamentReadForm();
             payload.name = String(payload.name || "").trim();
             if (!payload.name) {
                 document.getElementById("filament-name").classList.add("is-invalid");
@@ -6788,20 +7038,24 @@ $(function () {
             }
             document.getElementById("filament-name").classList.remove("is-invalid");
 
-            const isNew  = !profileId;
-            const url    = isNew ? "/api/filaments" : `/api/filaments/${profileId}`;
+            const isNew = !profileId;
+            const url = isNew ? "/api/filaments" : `/api/filaments/${profileId}`;
             const method = isNew ? "POST" : "PUT";
             try {
-                await filamentJsonRequest(url, {
-                    method: method,
-                    headers: { "Content-Type": "application/json" },
-                    body: JSON.stringify(payload),
-                }, "Failed to save filament profile");
+                await filamentJsonRequest(
+                    url,
+                    {
+                        method: method,
+                        headers: { "Content-Type": "application/json" },
+                        body: JSON.stringify(payload),
+                    },
+                    "Failed to save filament profile",
+                );
                 if (bsFilamentModal) bsFilamentModal.hide();
                 await loadFilaments();
                 flash_message(
                     isNew ? `Created filament profile "${payload.name}".` : `Saved filament profile "${payload.name}".`,
-                    "success"
+                    "success",
                 );
             } catch (err) {
                 flash_message(`Save failed: ${err.message}`, "danger");
@@ -6840,8 +7094,8 @@ $(function () {
     }
 
     // Printer selector — switch active printer from the navbar dropdown
-    document.querySelectorAll("#printer-selector .dropdown-item").forEach(function(item) {
-        item.addEventListener("click", function(e) {
+    document.querySelectorAll("#printer-selector .dropdown-item").forEach(function (item) {
+        item.addEventListener("click", function (e) {
             e.preventDefault();
             var newIndex = parseInt(this.getAttribute("data-printer-index"), 10);
             // Skip if already active or if the device is unsupported (disabled item)
@@ -6851,24 +7105,27 @@ $(function () {
 
             fetch("/api/printers/active", {
                 method: "POST",
-                headers: {"Content-Type": "application/json"},
-                body: JSON.stringify({index: newIndex})
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ index: newIndex }),
             })
-            .then(function(resp) {
-                return resp.json().then(function(data) { return {ok: resp.ok, data: data}; });
-            })
-            .then(function(r) {
-                if (!r.ok) {
-                    alert("Error: " + (r.data.error || "Failed to switch printer"));
-                    return;
-                }
-                // Reload shortly so the UI reconnects to the selected printer.
-                setTimeout(function() { window.location.reload(); }, 1000);
-            })
-            .catch(function(err) {
-                alert("Failed to switch printer: " + err);
-            });
+                .then(function (resp) {
+                    return resp.json().then(function (data) {
+                        return { ok: resp.ok, data: data };
+                    });
+                })
+                .then(function (r) {
+                    if (!r.ok) {
+                        alert("Error: " + (r.data.error || "Failed to switch printer"));
+                        return;
+                    }
+                    // Reload shortly so the UI reconnects to the selected printer.
+                    setTimeout(function () {
+                        window.location.reload();
+                    }, 1000);
+                })
+                .catch(function (err) {
+                    alert("Failed to switch printer: " + err);
+                });
         });
     });
-
 });
