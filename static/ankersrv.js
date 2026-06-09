@@ -1173,7 +1173,11 @@ $(function () {
         pollPrinterAlerts().catch(function (err) {
             console.warn("Failed to poll printer alerts", err);
         });
-        setInterval(function () {
+        window._intervalRegistry = window._intervalRegistry || {};
+        if (window._intervalRegistry['printerAlertPoll']) {
+            clearInterval(window._intervalRegistry['printerAlertPoll']);
+        }
+        window._intervalRegistry['printerAlertPoll'] = setInterval(function () {
             pollPrinterAlerts().catch(function (err) {
                 console.warn("Failed to poll printer alerts", err);
             });
@@ -1479,7 +1483,11 @@ $(function () {
         _updateMqttReconnectButton();
     }
 
-    setInterval(_updateMqttReconnectButton, 5000);
+    window._intervalRegistry = window._intervalRegistry || {};
+    if (window._intervalRegistry['mqttReconnectButton']) {
+        clearInterval(window._intervalRegistry['mqttReconnectButton']);
+    }
+    window._intervalRegistry['mqttReconnectButton'] = setInterval(_updateMqttReconnectButton, 5000);
     $(document).on("click", "#btn-mqtt-reconnect", triggerMqttReconnect);
 
     sockets.mqtt = new AutoWebSocket({
@@ -4069,7 +4077,11 @@ $(function () {
         });
 
         // Refresh chart every 2s
-        setInterval(function () {
+        window._intervalRegistry = window._intervalRegistry || {};
+        if (window._intervalRegistry['tempChartRefresh']) {
+            clearInterval(window._intervalRegistry['tempChartRefresh']);
+        }
+        window._intervalRegistry['tempChartRefresh'] = setInterval(function () {
             if (!tempChart || tempData.length === 0) return;
             const cutoff = Date.now() - tempWindowSec * 1000;
             const visible = tempData.filter(d => d.t.getTime() >= cutoff);
