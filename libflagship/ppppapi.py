@@ -119,7 +119,7 @@ class FileUploadInfo:
 class Wire:
 
     def __init__(self):
-        self.buf = []
+        self.buf = bytearray()
         self.rx, self.tx = Pipe(False)
 
     def peek(self, size, timeout=None):
@@ -141,7 +141,7 @@ class Wire:
     def read(self, size, timeout=None):
         res = self.peek(size, timeout)
         if res:
-            self.buf = self.buf[size:]
+            del self.buf[:size]
         return res
 
     def write(self, data):

@@ -3,6 +3,7 @@ import logging as log
 import threading
 import time
 
+from collections import OrderedDict
 from datetime import datetime, timedelta
 
 from ..lib.service import Service, ServiceRestartSignal, ServiceStoppedError
@@ -20,6 +21,7 @@ import cli.pppp
 _CONNECT_DEADLINE_SEC = 8.0
 _REPEATED_LOG_COOLDOWN_SEC = 10.0
 _REPEATED_LOG_NOTICE_COUNT = 5
+_LOG_REPEAT_STATE_MAX = 256
 
 
 def probe_pppp(config, printer_index) -> bool:
@@ -52,7 +54,7 @@ class PPPPService(Service):
         self.printer_index = 0 if printer_index is None else int(printer_index)
         self.xzyh_handlers = []
         self._handler_lock = threading.Lock()
-        self._log_repeat_state = {}
+        self._log_repeat_state = OrderedDict()
         self._connected_event = threading.Event()
         super().__init__()
 
@@ -106,10 +108,14 @@ class PPPPService(Service):
         now = time.monotonic()
         state = self._log_repeat_state.get(key)
         if state is None:
+            if len(self._log_repeat_state) >= _LOG_REPEAT_STATE_MAX:
+                self._log_repeat_state.popitem(last=False)
             self._log_repeat_state[key] = {"count": 1, "last_at": now}
             log.log(level, message, *args)
             return
 
+        # Move to end to mark as recently used
+        self._log_repeat_state.move_to_end(key)
         state["count"] += 1
         if (
             (now - state["last_at"]) < cooldown

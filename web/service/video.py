@@ -567,17 +567,17 @@ class VideoQueue(Service):
             return
 
         if self._in_place_recovery:
-            time.sleep(0.1)
+            self.idle(0.1)
             return
 
         if not self.pppp:
             self.pppp = self._ensure_pppp_ready()
             if self._handle_requested_recovery(self.pppp):
-                time.sleep(0.1)
+                self.idle(0.1)
                 return
             if not self.pppp:
                 log.debug("%s: PPPP not available yet", self.name)
-                time.sleep(0.5)
+                self.idle(0.5)
                 return
 
         # Snapshot the PPPP reference to avoid TOCTOU races if the service
@@ -587,18 +587,18 @@ class VideoQueue(Service):
             raise ServiceRestartSignal("PPPP reference lost during video session")
 
         if self._handle_requested_recovery(pppp):
-            time.sleep(0.1)
+            self.idle(0.1)
             return
 
         if not getattr(pppp, "connected", False):
             log.debug("%s: PPPP exists but is not connected yet", self.name)
-            time.sleep(0.5)
+            self.idle(0.5)
             return
 
         if getattr(self, "api_id", None) is None:
             if getattr(pppp, "_api", None) is None:
                 log.debug("%s: PPPP connected but API not ready yet", self.name)
-                time.sleep(0.5)
+                self.idle(0.5)
                 return
 
             self.api_id = id(pppp._api)
@@ -609,7 +609,7 @@ class VideoQueue(Service):
             started = self._start_live_if_needed(force=False)
             if not started:
                 log.info("%s: failed to start live view during late init", self.name)
-                time.sleep(0.5)
+                self.idle(0.5)
                 return
 
             if self.saved_light_state is not None:
@@ -643,7 +643,7 @@ class VideoQueue(Service):
                             f"{self.name}: Failed to restart live stream",
                             f"{self.name}: Video stall recovery exhausted",
                         )
-                    time.sleep(0.5)
+                    self.idle(0.5)
                     return
             elif self._live_started_at is not None:
                 since_start = now - self._live_started_at
@@ -658,7 +658,7 @@ class VideoQueue(Service):
                             f"{self.name}: Failed to restart live stream for initial-frame recovery",
                             f"{self.name}: Video stall recovery exhausted (no initial frame)",
                         )
-                    time.sleep(0.5)
+                    self.idle(0.5)
                     return
 
     def _attempt_stall_recovery(self, pppp, warn_msg, retry_fail_msg, exhaust_msg):

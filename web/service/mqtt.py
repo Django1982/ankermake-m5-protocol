@@ -1,5 +1,7 @@
+import json
 import logging
 import os
+import re
 import threading
 import time
 from enum import Enum
@@ -172,6 +174,7 @@ class MqttQueue(Service):
         self._filament_runout_pending = False
         self._filament_runout_pending_at = 0.0
         self._stored_file_selection_cond = threading.Condition(self._state_lock)
+        self._print_state_event = threading.Event()
         self._stored_file_preview_request_lock = threading.Lock()
         self._stored_file_preview_cache = {}
         self._stored_file_preview_seq = 0
@@ -463,17 +466,14 @@ class MqttQueue(Service):
         self._pending_archive_info = None
         return archive_info
 
+    _FILENAME_SANITIZE_RE = re.compile(r'[^\w.\-]')
+    _MULTI_DOT_RE = re.compile(r'\.{2,}')
+
     @staticmethod
     def _normalize_pending_archive_filename(filename):
-        cleaned = []
-        for char in os.path.basename(str(filename or "")):
-            if char.isalnum() or char in "._-":
-                cleaned.append(char)
-            else:
-                cleaned.append("_")
-        normalized = "".join(cleaned).lstrip(".")
-        while ".." in normalized:
-            normalized = normalized.replace("..", ".")
+        base = os.path.basename(str(filename or ""))
+        normalized = MqttQueue._FILENAME_SANITIZE_RE.sub('_', base).lstrip(".")
+        normalized = MqttQueue._MULTI_DOT_RE.sub('.', normalized)
         return normalized.lower()
 
     def _clear_recent_completion(self):
@@ -734,7 +734,11 @@ class MqttQueue(Service):
         while time.monotonic() < deadline:
             if self._stored_file_start_confirmed(file_path):
                 return True
-            time.sleep(0.1)
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            self._print_state_event.clear()
+            self._print_state_event.wait(timeout=min(0.1, remaining))
         return self._stored_file_start_confirmed(file_path)
 
     @staticmethod
@@ -862,7 +866,6 @@ class MqttQueue(Service):
             log.debug(f"TOPIC [{msg.topic}]")
             log.debug(enhex(msg.payload[:]))
             if body and getattr(self, "_debug_log_payloads", False):
-                import json
                 log.info(f"DEBUG MQTT PAYLOAD: {json.dumps(body, default=str)}")
 
             for obj in body:
@@ -878,6 +881,7 @@ class MqttQueue(Service):
                 self._forward_to_ha(obj)
                 with self._state_lock:
                     self._handle_notification(obj)
+                self._print_state_event.set()
 
     def worker_stop(self):
         self._ha.update_state(mqtt_connected=False)
@@ -1193,8 +1197,6 @@ class MqttQueue(Service):
 
         command_type = payload.get("commandType")
         ha_updates = {}
-
-        self._update_filament_state(payload)
 
         # Nozzle temperature (command 1003 = 0x03eb)
         if command_type == MqttMsgType.ZZ_MQTT_CMD_NOZZLE_TEMP:
