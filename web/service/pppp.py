@@ -48,6 +48,11 @@ def probe_pppp(config, printer_index) -> bool:
 
 class PPPPService(Service):
 
+    # PPPPService processes UDP packets for H.264 video ACKs. The default 10ms
+    # floor from the base class caps ACK rate and causes video stalls; run at
+    # full speed to match master behavior.
+    _min_iteration_sec = 0.0
+
     def __init__(self, printer_index=0):
         self.printer_index = 0 if printer_index is None else int(printer_index)
         self.xzyh_handlers = []
@@ -285,7 +290,7 @@ class PPPPService(Service):
         api = getattr(self, "_api", None)
         if api is None:
             if getattr(self, "wanted", True):
-                raise ServiceRestartSignal("PPPP API missing while service is wanted")
+                raise ServiceRestartSignal("PPPP API missing while service is wanted", delay=0)
             return
 
         # A stale/disconnected API object after video recovery is not a usable
@@ -293,7 +298,7 @@ class PPPPService(Service):
         # forever in a wanted-but-disconnected state.
         if getattr(api, "state", PPPPState.Connected) != PPPPState.Connected:
             if getattr(self, "wanted", True):
-                raise ServiceRestartSignal("PPPP API exists but is not connected while service is wanted")
+                raise ServiceRestartSignal("PPPP API exists but is not connected while service is wanted", delay=0)
             return
 
         try:
@@ -301,17 +306,27 @@ class PPPPService(Service):
         except (ConnectionResetError, OSError):
             if not getattr(self, "wanted", True):
                 return
-            raise ServiceRestartSignal()
+            raise ServiceRestartSignal(delay=0)
+
+        # Drain all remaining UDP packets without blocking. The 10ms service
+        # floor caps us at 100 poll() calls/second, but H.264 video needs many
+        # DRW ACKs/second. Without draining, the printer's send window fills and
+        # it stops streaming after ~5 seconds.
+        try:
+            while api.poll(timeout=0) is not None:
+                pass
+        except (ConnectionResetError, OSError):
+            pass
 
         api = getattr(self, "_api", None)
         if api is None:
             if getattr(self, "wanted", True):
-                raise ServiceRestartSignal("PPPP API disappeared during worker loop")
+                raise ServiceRestartSignal("PPPP API disappeared during worker loop", delay=0)
             return
 
         if getattr(api, "state", PPPPState.Connected) != PPPPState.Connected:
             if getattr(self, "wanted", True):
-                raise ServiceRestartSignal("PPPP API disconnected during worker loop")
+                raise ServiceRestartSignal("PPPP API disconnected during worker loop", delay=0)
             return
 
         chans = getattr(api, "chans", [])
