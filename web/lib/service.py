@@ -225,7 +225,8 @@ class Service(Thread):
             self.state = RunState.Stopping
             return
         _elapsed = time.monotonic() - _t0
-        _remaining = _SERVICE_MIN_ITERATION_SEC - _elapsed
+        _floor = getattr(self, '_min_iteration_sec', _SERVICE_MIN_ITERATION_SEC)
+        _remaining = _floor - _elapsed
         if _remaining > 0:
             time.sleep(_remaining)
 
