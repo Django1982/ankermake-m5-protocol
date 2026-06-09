@@ -6,8 +6,8 @@ import time
 from queue import Empty
 
 _STALL_TIMEOUT = 5.0  # seconds without a frame after video is flowing before soft restart
-_INITIAL_FRAME_TIMEOUT = 12.0  # give a fresh START_LIVE longer to deliver its first frame
-_STALL_MAX_RETRIES = 3  # escalate to hard restart after this many consecutive soft-reset failures
+_INITIAL_FRAME_TIMEOUT = 8.0  # give a fresh START_LIVE longer to deliver its first frame
+_STALL_MAX_RETRIES = 2  # escalate to hard restart after this many consecutive soft-reset failures
 _LIVE_REFRESH_COOLDOWN = 4.0
 _EXTERNAL_RECOVERY_COOLDOWN = 3.0
 
@@ -585,7 +585,7 @@ class VideoQueue(Service):
         # restarts between checks.  All subsequent accesses use this local.
         pppp = self.pppp
         if pppp is None:
-            raise ServiceRestartSignal("PPPP reference lost during video session")
+            raise ServiceRestartSignal("PPPP reference lost during video session", delay=0)
 
         if self._handle_requested_recovery(pppp):
             self.idle(0.1)
@@ -627,10 +627,10 @@ class VideoQueue(Service):
             return
 
         if getattr(pppp, "_api", None) is None:
-            raise ServiceRestartSignal("PPPP lost during video session")
+            raise ServiceRestartSignal("PPPP lost during video session", delay=0)
 
         if id(pppp._api) != self.api_id:
-            raise ServiceRestartSignal("New pppp connection detected, restarting video feed")
+            raise ServiceRestartSignal("New pppp connection detected, restarting video feed", delay=0)
 
         if self.handlers or self.timelapse_enabled:
             now = time.monotonic()
@@ -684,7 +684,7 @@ class VideoQueue(Service):
             if not pppp or not getattr(pppp, "connected", False):
                 log.warning("%s: PPPP unavailable during live refresh", self.name)
                 if attempt >= _STALL_MAX_RETRIES:
-                    raise ServiceRestartSignal(exhaust_msg)
+                    raise ServiceRestartSignal(exhaust_msg, delay=0)
                 time.sleep(0.25)
                 return
             if not self._start_live_if_needed(force=True):

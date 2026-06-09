@@ -26,6 +26,9 @@ WORKDIR /app
 # Configurable UID/GID for the non-root user (override with --build-arg)
 ARG UID=1000
 ARG GID=1000
+ARG GIT_COMMIT=unknown
+
+LABEL org.opencontainers.image.revision=$GIT_COMMIT
 
 # Create non-root user for running the application
 RUN groupadd -g ${GID} ankerctl && \
