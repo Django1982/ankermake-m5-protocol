@@ -325,10 +325,12 @@ class PPPPService(Service):
         # Drain all remaining UDP packets without blocking. The 10ms service
         # floor caps us at 100 poll() calls/second, but H.264 video needs many
         # DRW ACKs/second. Without draining, the printer's send window fills and
-        # it stops streaming after ~5 seconds.
+        # it stops streaming after ~5 seconds. Limit to 4096 to stay bounded
+        # (real OS socket buffers hold far fewer packets).
         try:
-            while api.poll(timeout=0) is not None:
-                pass
+            _drain = 4096
+            while _drain > 0 and api.poll(timeout=0) is not None:
+                _drain -= 1
         except (ConnectionResetError, OSError):
             pass
 
