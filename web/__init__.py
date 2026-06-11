@@ -359,6 +359,8 @@ SNAPSHOT_FRAME_WAIT_SEC = 3.0
 SNAPSHOT_FRAME_MAX_AGE_SEC = 2.0
 SNAPSHOT_FFMPEG_TIMEOUT_SEC = 30
 VIDEO_STREAM_QUEUE_MAX = 30
+MQTT_STREAM_QUEUE_MAX = 500
+UPLOAD_STREAM_QUEUE_MAX = 500
 
 
 def _video_has_recent_frame(vq, wait_sec=SNAPSHOT_FRAME_WAIT_SEC, max_age_sec=SNAPSHOT_FRAME_MAX_AGE_SEC):
@@ -742,11 +744,11 @@ def borrow_pppp(printer_index=None, ready=True):
     raise RuntimeError("No pppp service candidates available")
 
 
-def stream_mqtt(printer_index=None):
+def stream_mqtt(printer_index=None, maxsize=0):
     last_error = None
     for name in _mqtt_service_candidates(printer_index):
         try:
-            return app.svc.stream(name)
+            return app.svc.stream(name, maxsize=maxsize)
         except (AssertionError, KeyError, AttributeError) as err:
             last_error = err
             continue
@@ -2248,7 +2250,7 @@ def mqtt(sock):
             log.info("/ws/mqtt: new client connected, cancelling MQTT reconnect back-off")
             _mqtt_svc_ref.reset_reconnect_backoff()
     try:
-        for data in stream_mqtt(printer_index):
+        for data in stream_mqtt(printer_index, maxsize=MQTT_STREAM_QUEUE_MAX):
             log.debug(f"MQTT message: {data}")
             sock.send(json.dumps(data))
     except ConnectionClosed:
@@ -2553,7 +2555,7 @@ def upload(sock):
         return
 
     try:
-        for data in app.svc.stream("filetransfer"):
+        for data in app.svc.stream("filetransfer", maxsize=UPLOAD_STREAM_QUEUE_MAX):
             sock.send(json.dumps(data))
     except ConnectionClosed:
         log.debug("/ws/upload closed by client")

@@ -540,7 +540,10 @@ def test_pppp_service_worker_run_handles_reset_aabb_and_xzyh(monkeypatch):
 
     assert notifications[0][0] == 0
     assert notifications[0][1].data == b"x"
-    assert drained == [1]
+    # Single-channel API: the skip_rx_gap path is skipped (len(chans) == 1) and
+    # the AABB packet doesn't trigger an XZYH drain (M6 - no redundant
+    # unconditional drain of channel 1).
+    assert drained == []
 
     drained.clear()
     notifications.clear()
@@ -551,7 +554,8 @@ def test_pppp_service_worker_run_handles_reset_aabb_and_xzyh(monkeypatch):
     )
     svc.worker_run(timeout=0.1)
 
-    assert drained == [1, 0]
+    # XZYH-prefixed DRW data on channel 0 drains channel 0 only.
+    assert drained == [0]
 
     channel = FakeFD(
         peeks=[b"abcd" + b"\x00" * 12, b"abcd"],

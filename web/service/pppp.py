@@ -350,8 +350,6 @@ class PPPPService(Service):
             if chans[1].skip_rx_gap(max_queued=8):
                 self._drain_xzyh(chan=1)
 
-        self._drain_xzyh(chan=1)
-
         if not msg or msg.type != Type.DRW:
             return
 
