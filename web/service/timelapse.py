@@ -757,8 +757,11 @@ class TimelapseService:
         except Exception as err:
             log.warning(f"Timelapse: capture loop crashed: {err}")
         finally:
-            with self._lock:
-                self._capture_thread = None
+            # No lock here: _stop_capture_thread() holds self._lock while
+            # joining this thread, so acquiring it here would deadlock the
+            # join until its timeout. Plain attribute assignment is atomic
+            # under the GIL, so this is safe without the lock.
+            self._capture_thread = None
 
     def _take_snapshot(self):
         """Capture a single frame using ffmpeg."""

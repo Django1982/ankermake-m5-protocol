@@ -96,6 +96,11 @@ class PrintHistory:
             os.unlink(db_path)
         except FileNotFoundError:
             pass
+        for suffix in ("-wal", "-shm"):
+            try:
+                os.unlink(db_path + suffix)
+            except FileNotFoundError:
+                pass
 
     def _open_connection(self):
         """Open (or reopen) the persistent SQLite connection."""
@@ -127,6 +132,8 @@ class PrintHistory:
     def _connect(self):
         """Yield the persistent connection; auto-commits on clean exit, rolls back on exception."""
         conn = self._conn
+        if conn is None:
+            raise RuntimeError("History: database connection is closed")
         try:
             yield conn
             conn.commit()

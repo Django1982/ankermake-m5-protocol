@@ -361,7 +361,8 @@ class MqttQueue(Service):
                 )
             else:
                 self._clear_timelapse_start_offer()
-                self._timelapse.start_capture(effective_filename)
+                if self._timelapse:
+                    self._timelapse.start_capture(effective_filename)
         else:
             self._pending_history_start = True
             if defer_timelapse_start:
@@ -388,7 +389,7 @@ class MqttQueue(Service):
             self._history.record_start(self._last_filename, **record_kwargs)
             if getattr(self, "_timelapse_start_prompt_pending", False):
                 self._mark_timelapse_start_offer(self._last_filename)
-            else:
+            elif self._timelapse:
                 self._timelapse.start_capture(self._last_filename)
             self._pending_history_start = False
             log.info(f"Print start completed after filename arrived, filename={self._last_filename!r}")
