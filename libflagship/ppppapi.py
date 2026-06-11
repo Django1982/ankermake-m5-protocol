@@ -6,9 +6,8 @@ import logging as log
 import time
 
 from enum import Enum
-from multiprocessing import Pipe
 from datetime import datetime, timedelta
-from threading import Thread, Event, Lock
+from threading import Thread, Event, Lock, Condition
 from socket import AF_INET
 from dataclasses import dataclass
 
@@ -120,32 +119,26 @@ class Wire:
 
     def __init__(self):
         self.buf = bytearray()
-        self.rx, self.tx = Pipe(False)
+        self._cond = Condition()
 
     def peek(self, size, timeout=None):
-        # Zero timeout on self.rx.poll() means "wait forever", but we want it to
-        # mean "no wait", so we emulate that by setting it to 1us.
-        if timeout == 0.0:
-            timeout = 0.000001
-
-        if timeout is not None:
-            deadline = datetime.now() + timedelta(seconds=timeout)
-
-        while len(self.buf) < size:
-            if timeout and not self.rx.poll(timeout=(deadline - datetime.now()).total_seconds()):
+        with self._cond:
+            if not self._cond.wait_for(lambda: len(self.buf) >= size, timeout=timeout):
                 return None
-            self.buf.extend(self.rx.recv())
-
-        return bytes(self.buf[:size])
+            return bytes(self.buf[:size])
 
     def read(self, size, timeout=None):
-        res = self.peek(size, timeout)
-        if res:
+        with self._cond:
+            if not self._cond.wait_for(lambda: len(self.buf) >= size, timeout=timeout):
+                return None
+            res = bytes(self.buf[:size])
             del self.buf[:size]
-        return res
+            return res
 
     def write(self, data):
-        self.tx.send(data)
+        with self._cond:
+            self.buf.extend(data)
+            self._cond.notify_all()
 
 
 class Channel:
@@ -166,6 +159,7 @@ class Channel:
         self.max_in_flight = max_in_flight
         self.max_age_warn = max_age_warn
         self.lock = Lock()
+        self._tx_lock = Lock()
         self._rx_gap_report_at = 0.0
         self._rx_gap_report_skips = 0
         self._rx_gap_report_packets = 0
@@ -250,12 +244,13 @@ class Channel:
 
         txq = self.txqueue
 
-        if self.backlog and len(txq) < self.max_in_flight:
-            while self.backlog and len(txq) < self.max_in_flight:
-                txq.append(self.backlog.pop(0))
+        with self._tx_lock:
+            if self.backlog and len(txq) < self.max_in_flight:
+                while self.backlog and len(txq) < self.max_in_flight:
+                    txq.append(self.backlog.pop(0))
 
-            # sort list to make sure oldest deadline is first
-            txq.sort()
+                # sort list to make sure oldest deadline is first
+                txq.sort()
 
         res = []
         now = datetime.now()
@@ -279,19 +274,23 @@ class Channel:
         return self.rx.read(nbytes, timeout)
 
     def write(self, payload, block=True, timeout=None):
-        pdata = payload[:]
+        # memoryview avoids re-copying the shrinking tail on each chunk
+        # (bytes slicing is O(n^2) for large payloads); chunks are converted
+        # back to bytes since packet packing requires a bytes/Bytes payload.
+        pdata = memoryview(payload)
 
         tx_ctr_start = self.tx_ctr
 
         # schedule all packets, starting from current time
         deadline = datetime.now()
-        while pdata:
-            # schedule transmission in 1kb chunks
-            data, pdata = pdata[:1024], pdata[1024:]
-            self.backlog.append((deadline, self.tx_ctr, data))
-            self.tx_ctr += 1
+        with self._tx_lock:
+            while pdata:
+                # schedule transmission in 1kb chunks
+                data, pdata = bytes(pdata[:1024]), pdata[1024:]
+                self.backlog.append((deadline, self.tx_ctr, data))
+                self.tx_ctr += 1
 
-        tx_ctr_done = self.tx_ctr
+            tx_ctr_done = self.tx_ctr
 
         deadline = None
         if block and timeout is not None:
@@ -317,7 +316,8 @@ class Channel:
     def reset_tx(self):
         with self.lock:
             self.txqueue.clear()
-            self.backlog.clear()
+            with self._tx_lock:
+                self.backlog.clear()
             self.acks.clear()
             self.tx_ack = self.tx_ctr
             self.event.set()

@@ -117,7 +117,7 @@ Benutzerfreundliche Fehlermeldungen, Details nur in Server-Logs via `log.excepti
 **Datei:** `web/__init__.py`
 **Status:** Behoben (Phase 1)
 
-Konfigurierbares Limit via `UPLOAD_MAX_MB` ENV (Default: 2 GB).
+Konfigurierbares Limit via `UPLOAD_MAX_MB` ENV (Default: 512 MB).
 
 ---
 

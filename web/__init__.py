@@ -522,7 +522,7 @@ def _build_windows_launcher_bat(install_dir):
 def _configure_request_limits(flask_app, env=None):
     # Keep large GCode uploads configurable, but bound multipart metadata more
     # tightly. These form limits apply to multipart parsing, not the file size.
-    max_upload_mb = _env_int("UPLOAD_MAX_MB", 2048, env=env)
+    max_upload_mb = _env_int("UPLOAD_MAX_MB", 512, env=env)
     max_form_memory_kb = _env_int("UPLOAD_MAX_FORM_MEMORY_KB", 512, env=env)
     max_form_parts = _env_int("UPLOAD_MAX_FORM_PARTS", 20, env=env)
 
