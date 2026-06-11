@@ -1294,8 +1294,10 @@ $(function () {
         }
 
         _message(event) {
-            // Check for server-side auth rejection before processing
-            if (typeof event.data === "string") {
+            // Check for server-side auth rejection before processing. Only
+            // needed on the first message: a rejection closes the socket
+            // immediately, so once we're open this can't happen anymore.
+            if (!this.is_open && typeof event.data === "string") {
                 try {
                     const parsed = JSON.parse(event.data);
                     if (parsed.error === "unauthorized") {
@@ -1811,7 +1813,8 @@ $(function () {
             }
             const now = window.performance && window.performance.now ? window.performance.now() : Date.now();
             this.videoQueue.push({
-                data: event.data.slice(0),
+                // event.data is a fresh ArrayBuffer per message, no copy needed
+                data: event.data,
                 receivedAt: now,
             });
             if (this.videoQueue.length > this.videoBufferMaxPackets) {
