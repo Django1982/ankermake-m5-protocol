@@ -255,10 +255,16 @@ class Channel:
         res = []
         now = datetime.now()
 
+        retransmitted = False
         while txq and txq[0][0] < now:
             deadline, index, pkt = txq.pop(0)
             res.append(PktDrw(chan=self.index, index=index, data=pkt))
             txq.append((deadline + self.timeout, index, pkt))
+            retransmitted = True
+
+        if retransmitted:
+            # restore deadline ordering after appending rescheduled packets
+            txq.sort()
 
         # the returned chunks will be (re)transmitted
         return res

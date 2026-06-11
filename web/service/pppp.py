@@ -1,5 +1,5 @@
 import json
-import logging as log
+import logging
 import threading
 import time
 
@@ -14,6 +14,8 @@ from libflagship.pppp import P2PCmdType, PktClose, Duid, Type, Xzyh, Aabb
 from libflagship.ppppapi import AnkerPPPPAsyncApi, PPPPState
 
 import cli.pppp
+
+log = logging.getLogger("pppp")
 
 # Some printers take a few extra seconds to accept a fresh PPPP session after
 # a video/timelapse recovery. A slightly longer deadline avoids unnecessary
@@ -165,7 +167,7 @@ class PPPPService(Service):
         )
         if not ip_addr:
             self._log_repeated(
-                log.WARNING,
+                logging.WARNING,
                 ("no_ip", printer_index, printer.p2p_duid),
                 "%s: PPPP connect aborted because no printer IP was resolved "
                 "(printer=%s, duid=%s)",
@@ -184,7 +186,7 @@ class PPPPService(Service):
 
         started_at = datetime.now()
         self._log_repeated(
-            log.INFO,
+            logging.INFO,
             ("connect_attempt", printer_index, ip_addr),
             "%s: trying connect to printer %s (%s) over pppp using ip %s "
             "(deadline=%.1fs)",
@@ -202,7 +204,7 @@ class PPPPService(Service):
             if remaining <= 0:
                 elapsed = (datetime.now() - started_at).total_seconds()
                 self._log_repeated(
-                    log.WARNING,
+                    logging.WARNING,
                     ("connect_timeout", printer_index, ip_addr),
                     "%s: PPPP connection timed out after %.1fs "
                     "(printer=%s, ip=%s, state=%s)",
@@ -219,7 +221,7 @@ class PPPPService(Service):
             except ConnectionResetError:
                 elapsed = (datetime.now() - started_at).total_seconds()
                 self._log_repeated(
-                    log.WARNING,
+                    logging.WARNING,
                     ("connect_reset", printer_index, ip_addr),
                     "%s: PPPP connection reset after %.1fs "
                     "(printer=%s, ip=%s)",

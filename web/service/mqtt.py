@@ -1875,10 +1875,15 @@ class MqttQueue(Service):
             return
 
         lines = cli.util.normalize_gcode_lines(gcode)
+        first = True
         for line in lines:
             if self._is_duplicate_g28(line):
                 log.debug("Ignoring duplicate homing command: %s", line)
                 continue
+            if not first:
+                # pace commands; no need to wait after the last one
+                time.sleep(0.1)
+            first = False
             cmd = {
                 "commandType": MqttMsgType.ZZ_MQTT_CMD_GCODE_COMMAND.value,
                 "cmdData": line,
@@ -1886,7 +1891,6 @@ class MqttQueue(Service):
             }
             log.debug("Sending GCode command: %s", line)
             self.client.command(cmd)
-            time.sleep(0.1)
 
     def _is_duplicate_g28(self, line):
         parts = line.split()
