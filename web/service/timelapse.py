@@ -693,9 +693,9 @@ class TimelapseService:
                 log.info("Timelapse: no frames captured, skipping finalization")
                 self._cleanup_dir(assemble_dir)
 
-    def _finalize_now(self, dir_path, filename, frame_count):
+    def _finalize_now(self, dir_path, filename, frame_count, suffix=""):
         """Assemble video immediately (runs in dedicated background thread)."""
-        self._finalize_capture_dir(dir_path, filename, frame_count)
+        self._finalize_capture_dir(dir_path, filename, frame_count, suffix=suffix)
 
     def fail_capture(self):
         """Stop capture on failure — assemble partial timelapse if frames exist."""
@@ -1184,7 +1184,13 @@ class TimelapseService:
         # Assemble/delete all but the youngest (shouldn't normally happen)
         for age, dir_path, filename, frame_count in candidates[1:]:
             log.info(f"Timelapse: recovering orphaned capture '{filename}' ({frame_count} frames)")
-            self._finalize_capture_dir(dir_path, filename, frame_count, suffix="_recovered")
+            threading.Thread(
+                target=self._finalize_now,
+                args=(dir_path, filename, frame_count),
+                kwargs={"suffix": "_recovered"},
+                daemon=True,
+                name="timelapse-assemble",
+            ).start()
 
         # Handle the youngest candidate
         if youngest_age <= _MAX_ORPHAN_AGE_SEC:
@@ -1204,7 +1210,13 @@ class TimelapseService:
                 f"Timelapse: assembling stale capture '{youngest_filename}' "
                 f"({youngest_frames} frames, {youngest_age / 3600:.1f}h old)"
             )
-            self._finalize_capture_dir(youngest_dir, youngest_filename, youngest_frames, suffix="_recovered")
+            threading.Thread(
+                target=self._finalize_now,
+                args=(youngest_dir, youngest_filename, youngest_frames),
+                kwargs={"suffix": "_recovered"},
+                daemon=True,
+                name="timelapse-assemble",
+            ).start()
 
     def _assemble_video(self, suffix=""):
         """Assemble current capture into an MP4 video."""
