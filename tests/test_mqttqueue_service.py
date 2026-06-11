@@ -443,6 +443,44 @@ def test_deferred_filename_starts_timelapse_after_print_state(monkeypatch):
     assert timelapse_calls == [("start", "deferred.gcode")]
 
 
+def test_handle_notification_print_start_does_not_crash_when_timelapse_unavailable(monkeypatch):
+    """If TimelapseService failed to initialize, _timelapse is None.
+    A direct print start (filename already known) must not crash the
+    MQTT worker on the missing start_capture() call."""
+    global ha_updates, history_calls, timelapse_calls, events
+    ha_updates, history_calls, timelapse_calls, events = [], [], [], []
+    queue = _queue()
+    queue._timelapse = None
+    monkeypatch.setattr("web.service.mqtt.time.monotonic", lambda: 100.0)
+
+    queue._handle_notification({"commandType": 1044, "filePath": "/tmp/cube.gcode"})
+    queue._handle_notification({"commandType": 1000, "value": 1})
+
+    assert queue._state == PrintState.PRINTING
+    assert history_calls == [("start", ("cube.gcode",), {"task_id": None})]
+
+
+def test_deferred_filename_print_start_does_not_crash_when_timelapse_unavailable(monkeypatch):
+    """Same as above, but for the deferred-filename path
+    (_complete_deferred_print_start), which also called
+    self._timelapse.start_capture() unguarded."""
+    global ha_updates, history_calls, timelapse_calls, events
+    ha_updates, history_calls, timelapse_calls, events = [], [], [], []
+    queue = _queue()
+    queue._timelapse = None
+    monkeypatch.setattr("web.service.mqtt.time.monotonic", lambda: 100.0)
+
+    queue._handle_notification({"commandType": 1000, "value": 1})
+
+    assert queue._state == PrintState.PRINTING
+    assert queue._pending_history_start is True
+
+    queue._handle_notification({"commandType": 1044, "filePath": "/tmp/deferred.gcode"})
+
+    assert queue._pending_history_start is False
+    assert history_calls == [("start", ("deferred.gcode",), {"task_id": None})]
+
+
 def test_handle_notification_aborts_active_print_on_value_8(monkeypatch):
     global ha_updates, history_calls, timelapse_calls, events
     ha_updates, history_calls, timelapse_calls, events = [], [], [], []

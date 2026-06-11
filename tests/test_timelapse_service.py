@@ -654,6 +654,35 @@ def test_stop_capture_thread_clears_stale_dead_thread_reference(tmp_path):
     assert svc._capture_thread is None
 
 
+def test_stop_capture_thread_returns_quickly_with_active_capture_thread(tmp_path):
+    """_stop_capture_thread() is called from finish_capture()/fail_capture()/
+    start_capture() while holding self._lock. _capture_loop()'s finally block
+    must clear _capture_thread without acquiring that lock, otherwise the
+    join() below stalls for the full _SNAPSHOT_TIMEOUT + 2 (12s)."""
+    import threading
+
+    config_mgr = SimpleNamespace(config_root=str(tmp_path))
+    svc = TimelapseService(config_mgr, captures_dir=str(tmp_path))
+    svc._interval = 9999
+    svc.is_capture_paused = lambda: False
+    svc._take_snapshot = lambda: None
+
+    svc._stop_event.clear()
+    svc._capture_thread = threading.Thread(target=svc._capture_loop, daemon=True)
+    svc._capture_thread.start()
+
+    # Give the capture thread time to enter its long wait().
+    time.sleep(0.1)
+
+    with svc._lock:
+        start = time.monotonic()
+        svc._stop_capture_thread()
+        elapsed = time.monotonic() - start
+
+    assert elapsed < 1.0, f"_stop_capture_thread blocked for {elapsed:.2f}s"
+    assert svc._capture_thread is None
+
+
 def test_capture_loop_skips_snapshots_while_capture_is_paused(tmp_path):
     import threading
 

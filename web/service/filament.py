@@ -292,6 +292,8 @@ class FilamentStore:
     def _connect(self):
         """Yield the persistent connection; auto-commits on clean exit, rolls back on exception."""
         conn = self._conn
+        if conn is None:
+            raise RuntimeError("Filament store: database connection is closed")
         try:
             yield conn
             conn.commit()
@@ -324,6 +326,11 @@ class FilamentStore:
             os.unlink(db_path)
         except FileNotFoundError:
             pass
+        for suffix in ("-wal", "-shm"):
+            try:
+                os.unlink(db_path + suffix)
+            except FileNotFoundError:
+                pass
 
     def _init_db(self):
         with self._lock:
