@@ -349,7 +349,7 @@ ankerctl is configured through environment variables. For Docker deployments, co
 | `FLASK_SECRET_KEY` | *(auto-generated)* | Session cookie secret; set this explicitly if you want it to persist across restarts |
 | `PRINTER_INDEX` | `0` | Select printer by index when multiple printers are configured |
 | **Upload** | | |
-| `UPLOAD_MAX_MB` | `2048` | Maximum upload file size in MB |
+| `UPLOAD_MAX_MB` | `512` | Maximum upload file size in MB |
 | `UPLOAD_RATE_MBPS` | `10` | Upload speed to printer in Mbit/s (choices: 5, 10, 25, 50, 100) |
 | **Security** | | |
 | `ANKERCTL_API_KEY` | *(unset)* | API key for write-operation authentication |

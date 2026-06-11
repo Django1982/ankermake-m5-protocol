@@ -189,7 +189,7 @@ PRINTER_INDEX          # Select printer (default: 0)
 FLASK_HOST             # Web server host (default: 127.0.0.1)
 FLASK_PORT             # Web server port (default: 4470)
 FLASK_SECRET_KEY       # Session cookie secret (auto-generated if unset; set for persistence)
-UPLOAD_MAX_MB          # Max file upload size in MB (default: 2048)
+UPLOAD_MAX_MB          # Max file upload size in MB (default: 512)
 
 # --- Security ---
 ANKERCTL_API_KEY       # API key for write-operation auth (unset = no auth)

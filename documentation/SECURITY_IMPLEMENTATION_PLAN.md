@@ -11,7 +11,7 @@ Basierend auf dem [Security Audit](./SECURITY_AUDIT.md). Alle Phasen umgesetzt.
 | 1.1 | Config-Verzeichnis `0700` (K2) | `cli/config.py` | `os.chmod(dirs.user_config_path, 0o700)` nach `mkdir()` |
 | 1.2 | `secrets` statt `random` (H1) | `libflagship/seccode.py` | `secrets.randbelow(90000000) + 10000000` |
 | 1.3 | Mutable Default fixen (M5) | `libflagship/httpapi.py` | `invalid_dsks=None` + Body-Initialisierung |
-| 1.4 | Upload-Limit (M4) | `web/__init__.py` | `UPLOAD_MAX_MB` ENV (Default: 2 GB) |
+| 1.4 | Upload-Limit (M4) | `web/__init__.py` | `UPLOAD_MAX_MB` ENV (Default: 512 MB) |
 
 ---
 
