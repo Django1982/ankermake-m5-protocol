@@ -1,5 +1,6 @@
 import json
 import os
+import threading
 import time
 from contextlib import contextmanager
 from types import SimpleNamespace
@@ -27,6 +28,18 @@ class FakeConfigManager:
     @contextmanager
     def open(self):
         yield self._cfg
+
+
+class _ImmediateThread:
+    """threading.Thread stand-in that runs its target synchronously on start()."""
+
+    def __init__(self, target=None, args=(), kwargs=None, **_unused):
+        self._target = target
+        self._args = args
+        self._kwargs = kwargs or {}
+
+    def start(self):
+        self._target(*self._args, **self._kwargs)
 
 
 def test_timelapse_meta_and_video_file_helpers(tmp_path):
@@ -256,6 +269,9 @@ def test_timelapse_scan_recovers_or_resumes_in_progress(monkeypatch, tmp_path):
     monkeypatch.setattr(TimelapseService, "_schedule_finalize", lambda self, d, f, c, suffix="": scheduled.append((d, f, c, suffix)))
     monkeypatch.setattr(TimelapseService, "_assemble_video_from", lambda self, d, f, c, suffix="": assembled.append((d, f, c, suffix)))
     monkeypatch.setattr(TimelapseService, "_prune_old_videos", lambda self: pruned.append(True))
+    # Orphan assembly now runs in a background thread (M2); run it
+    # synchronously here so the assertions below are deterministic.
+    monkeypatch.setattr("web.service.timelapse.threading.Thread", _ImmediateThread)
 
     svc = TimelapseService(cfg, captures_dir=tmp_path)
 
@@ -264,6 +280,53 @@ def test_timelapse_scan_recovers_or_resumes_in_progress(monkeypatch, tmp_path):
     assert scheduled and scheduled[0][1] == "young.gcode"
     assert assembled and assembled[0][1] == "old.gcode" and assembled[0][3] == "_recovered"
     assert pruned == [True]
+
+
+def test_timelapse_scan_assembles_orphans_in_background(monkeypatch, tmp_path):
+    """Orphan-capture assembly must not block service startup (M2)."""
+    cfg = FakeConfigManager(tmp_path)
+    base = tmp_path / _IN_PROGRESS_SUBDIR
+    base.mkdir()
+
+    young = base / "young_capture"
+    young.mkdir()
+    (young / "frame_00000.jpg").write_bytes(b"x")
+    (young / "frame_00001.jpg").write_bytes(b"y")
+    with open(young / ".meta", "w") as fh:
+        json.dump({"filename": "young.gcode", "frame_count": 2}, fh)
+
+    old = base / "old_capture"
+    old.mkdir()
+    (old / "frame_00000.jpg").write_bytes(b"x")
+    (old / "frame_00001.jpg").write_bytes(b"y")
+    with open(old / ".meta", "w") as fh:
+        json.dump({"filename": "old.gcode", "frame_count": 2}, fh)
+    stale_time = time.time() - (25 * 3600)
+    os.utime(old, (stale_time, stale_time))
+
+    started = threading.Event()
+    release = threading.Event()
+    done = threading.Event()
+    finalized = []
+
+    def slow_finalize(self, d, f, c, suffix=""):
+        started.set()
+        release.wait(timeout=2)
+        finalized.append((d, f, c, suffix))
+        done.set()
+
+    monkeypatch.setattr(TimelapseService, "_schedule_finalize", lambda self, d, f, c, suffix="": None)
+    monkeypatch.setattr(TimelapseService, "_finalize_capture_dir", slow_finalize)
+
+    start = time.monotonic()
+    svc = TimelapseService(cfg, captures_dir=tmp_path)
+    elapsed = time.monotonic() - start
+
+    assert elapsed < 0.5
+    assert started.wait(timeout=2)
+    release.set()
+    assert done.wait(timeout=2)
+    assert finalized and finalized[0][1] == "old.gcode" and finalized[0][3] == "_recovered"
 
 
 def test_timelapse_scan_only_recovers_matching_printer_capture(monkeypatch, tmp_path):

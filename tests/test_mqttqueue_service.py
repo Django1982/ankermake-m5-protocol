@@ -1,8 +1,10 @@
 import logging
+import queue as queue_module
+import threading
 import time
 from types import SimpleNamespace
 
-from web.service.mqtt import MqttQueue, PrintState
+from web.service.mqtt import MqttQueue, PrintState, EVENT_PRINT_FINISHED
 
 
 def _queue():
@@ -1871,3 +1873,87 @@ def test_silent_reconnect_count_accumulates_across_reconnects():
     assert delays[2] == 1.0
     assert delays[3] == 60.0
     assert delays[4] == 120.0, f"Expected 120s on 5th silence, got {delays[4]}"
+
+
+def _enable_real_send_event(queue):
+    """Restore the real _send_event/_notification_worker (the _queue() helper
+    stubs _send_event with a no-op lambda) and start the dispatcher thread."""
+    del queue._send_event
+    queue._notification_queue = queue_module.Queue()
+    worker = threading.Thread(target=queue._notification_worker, daemon=True)
+    worker.start()
+    return worker
+
+
+def test_send_event_does_not_block_on_slow_notifier():
+    """_send_event() must only enqueue; the slow snapshot+HTTP work happens
+    in the background _notification_worker thread (H2)."""
+    global ha_updates, history_calls, timelapse_calls, events
+    ha_updates, history_calls, timelapse_calls, events = [], [], [], []
+    queue = _queue()
+    _enable_real_send_event(queue)
+
+    started = threading.Event()
+    release = threading.Event()
+    sent = []
+
+    def slow_send(event, payload=None, attachments=None):
+        started.set()
+        release.wait(timeout=2)
+        sent.append((event, payload))
+        return True, "ok"
+
+    queue._notifier = SimpleNamespace(
+        is_event_enabled=lambda event: True,
+        progress_interval=lambda default=25: 25,
+        progress_max=lambda: None,
+        build_attachments=lambda preview_url=None: (None, []),
+        send=slow_send,
+        cleanup_attachments=lambda paths: None,
+    )
+
+    start = time.monotonic()
+    queue._send_event(EVENT_PRINT_FINISHED, {"filename": "cube.gcode"}, include_image=True)
+    elapsed = time.monotonic() - start
+
+    assert elapsed < 0.05
+    assert started.wait(timeout=1)
+    release.set()
+    queue._notification_queue.join()
+    assert sent == [(EVENT_PRINT_FINISHED, {"filename": "cube.gcode"})]
+
+
+def test_handle_notification_print_finished_does_not_block_on_slow_notifier(monkeypatch):
+    """A simulated EVENT_PRINT_FINISHED with a slow notifier stub must not
+    slow down _handle_notification (worker_run iteration time stays low)."""
+    global ha_updates, history_calls, timelapse_calls, events
+    ha_updates, history_calls, timelapse_calls, events = [], [], [], []
+    queue = _queue()
+    _enable_real_send_event(queue)
+    monkeypatch.setattr("web.service.mqtt.time.monotonic", lambda: 100.0)
+
+    release = threading.Event()
+
+    def slow_send(event, payload=None, attachments=None):
+        release.wait(timeout=2)
+        return True, "ok"
+
+    queue._notifier = SimpleNamespace(
+        is_event_enabled=lambda event: True,
+        progress_interval=lambda default=25: 25,
+        progress_max=lambda: None,
+        build_attachments=lambda preview_url=None: (None, []),
+        send=slow_send,
+        cleanup_attachments=lambda paths: None,
+    )
+
+    queue._handle_notification({"commandType": 1044, "filePath": "/tmp/cube.gcode"})
+    queue._handle_notification({"commandType": 1000, "value": 1})
+
+    start = time.monotonic()
+    queue._handle_notification({"commandType": 1000, "value": 0})
+    elapsed = time.monotonic() - start
+
+    assert elapsed < 0.2
+    release.set()
+    queue._notification_queue.join()

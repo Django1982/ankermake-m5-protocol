@@ -1,6 +1,7 @@
 import json
 import logging
 import os
+import queue
 import re
 import threading
 import time
@@ -117,6 +118,13 @@ class MqttQueue(Service):
 
     def worker_init(self):
         self._notifier = AppriseNotifier(app.config["config"], printer_index=self.printer_index)
+        self._notification_queue = queue.Queue()
+        self._notification_thread = threading.Thread(
+            target=self._notification_worker,
+            daemon=True,
+            name=f"{self.name}-notify",
+        )
+        self._notification_thread.start()
         config_root = str(app.config["config"].config_root)
         self._history = PrintHistory(
             db_path=f"{config_root}/history.db",
@@ -1608,13 +1616,27 @@ class MqttQueue(Service):
         return payload_out
 
     def _send_event(self, event, payload, include_image=False):
-        attachments = None
-        cleanup_paths = []
-        if include_image and self._notifier.is_event_enabled(event):
-            attachments, cleanup_paths = self._notifier.build_attachments(preview_url=self._preview_url)
-        self._notifier.send(event, payload=payload, attachments=attachments)
-        if cleanup_paths:
-            self._notifier.cleanup_attachments(cleanup_paths)
+        # Snapshot capture and the HTTP POST to Apprise can take ~10s; hand the
+        # work off to _notification_worker so callers (often holding
+        # _state_lock) never block on it. preview_url is captured now since
+        # _reset_print_state() may clear self._preview_url right after this call.
+        self._notification_queue.put((event, payload, include_image, self._preview_url))
+
+    def _notification_worker(self):
+        while True:
+            event, payload, include_image, preview_url = self._notification_queue.get()
+            try:
+                attachments = None
+                cleanup_paths = []
+                if include_image and self._notifier.is_event_enabled(event):
+                    attachments, cleanup_paths = self._notifier.build_attachments(preview_url=preview_url)
+                self._notifier.send(event, payload=payload, attachments=attachments)
+                if cleanup_paths:
+                    self._notifier.cleanup_attachments(cleanup_paths)
+            except Exception:
+                log.exception(f"{self.name}: failed to dispatch notification for event {event!r}")
+            finally:
+                self._notification_queue.task_done()
 
     def set_debug_logging(self, enabled):
         self._debug_log_payloads = enabled
