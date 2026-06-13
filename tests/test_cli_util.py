@@ -6,6 +6,7 @@ import pytest
 
 import cli.checkver
 from cli.util import (
+    extract_filament_info,
     extract_gcode_thumbnail,
     extract_layer_count,
     json_key_value,
@@ -102,6 +103,17 @@ def test_extract_layer_count_reads_header_and_falls_back_to_markers():
 
     assert extract_layer_count(header) == 42
     assert extract_layer_count(fallback) == 2
+
+
+def test_extract_filament_info_reads_orca_slicer_footer():
+    data = (
+        b"G28\n"
+        b"; filament_settings_id = \"Sunlu Rapid PETG\"\n"
+        b"; filament_type = PETG\n"
+        b"; filament_vendor = Sunlu\n"
+    )
+
+    assert extract_filament_info(data) == {"type": "PETG", "vendor": "Sunlu"}
 
 
 def test_extract_gcode_thumbnail_reads_embedded_png_and_prefers_largest():

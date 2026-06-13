@@ -180,6 +180,9 @@ class MqttQueue(Service):
         self._filament_change_step_len = None
         self._filament_issue = None
         self._filament_issue_code = None
+        self._filament_vendor = None
+        self._filament_type = None
+        self._filament_metadata_source = None
         self._pause_reason = None
         self._filament_runout_pending = False
         self._filament_runout_pending_at = 0.0
@@ -200,6 +203,12 @@ class MqttQueue(Service):
     def set_gcode_layer_count(self, count: int):
         """Store the layer count extracted from a GCode header for UI display."""
         self._gcode_layer_count = count
+
+    def set_gcode_filament_info(self, vendor=None, type=None):
+        """Store slicer filament metadata for the next print."""
+        self._filament_vendor = self._clean_filament_metadata(vendor)
+        self._filament_type = self._clean_filament_metadata(type)
+        self._filament_metadata_source = "gcode" if self._filament_vendor or self._filament_type else None
 
     def reset_reconnect_backoff(self):
         """Cancel any reconnect back-off and attempt connection immediately.
@@ -248,6 +257,9 @@ class MqttQueue(Service):
         self._last_print_schedule_filename = None
         self._last_print_schedule_seen_at = 0.0
         self._pending_prepare_state_logged = False
+        self._filament_vendor = None
+        self._filament_type = None
+        self._filament_metadata_source = None
         self._clear_timelapse_start_offer()
         self._pause_reason = None
         self._filament_runout_pending = False
@@ -480,6 +492,34 @@ class MqttQueue(Service):
 
     _FILENAME_SANITIZE_RE = re.compile(r'[^\w.\-]')
     _MULTI_DOT_RE = re.compile(r'\.{2,}')
+    _FILAMENT_TYPE_FROM_FILENAME_RE = re.compile(
+        r"(?:^|[_\-\s.])(PLA|PETG|ABS|ASA|TPU|PC|PA|NYLON|PVA|HIPS)(?:$|[_\-\s.])",
+        re.IGNORECASE,
+    )
+
+    @staticmethod
+    def _clean_filament_metadata(value):
+        cleaned = str(value or "").strip().strip('"').strip()
+        return cleaned or None
+
+    def _infer_filament_type_from_filename(self, filename):
+        if self._filament_metadata_source == "gcode":
+            return
+        match = self._FILAMENT_TYPE_FROM_FILENAME_RE.search(os.path.basename(str(filename or "")))
+        self._filament_vendor = None
+        self._filament_type = match.group(1).upper() if match else None
+        self._filament_metadata_source = "filename" if match else None
+
+    def _filament_material_label(self):
+        parts = [
+            value
+            for value in (
+                getattr(self, "_filament_vendor", None),
+                getattr(self, "_filament_type", None),
+            )
+            if value
+        ]
+        return " ".join(parts) if parts else None
 
     @staticmethod
     def _normalize_pending_archive_filename(filename):
@@ -525,6 +565,7 @@ class MqttQueue(Service):
         with self._state_lock:
             if filename:
                 self._last_filename = filename
+                self._infer_filament_type_from_filename(filename)
             if task_id:
                 self._last_task_id = task_id
             if archive_info and archive_info.get("archive_relpath"):
@@ -1507,6 +1548,7 @@ class MqttQueue(Service):
                     filename = self._last_filename
             else:
                 self._last_filename = filename
+                self._infer_filament_type_from_filename(filename)
             self._complete_deferred_print_start()
 
         pending_name = os.path.basename(self._pending_stored_file_path) if self._pending_stored_file_path else None
@@ -1707,6 +1749,10 @@ class MqttQueue(Service):
             "filament": {
                 "state": getattr(self, "_filament_state", "unknown"),
                 "label": FILAMENT_STATE_LABELS.get(getattr(self, "_filament_state", "unknown"), "Unknown"),
+                "material_label": self._filament_material_label(),
+                "vendor": getattr(self, "_filament_vendor", None),
+                "type": getattr(self, "_filament_type", None),
+                "metadata_source": getattr(self, "_filament_metadata_source", None),
                 "loaded": True if getattr(self, "_filament_state", "unknown") == "loaded" else None,
                 "issue": getattr(self, "_filament_issue", None),
                 "issue_label": FILAMENT_ISSUE_LABELS.get(getattr(self, "_filament_issue", None)),

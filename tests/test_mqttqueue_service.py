@@ -49,6 +49,9 @@ def _queue():
     queue._filament_change_value = None
     queue._filament_change_progress = None
     queue._filament_change_step_len = None
+    queue._filament_vendor = None
+    queue._filament_type = None
+    queue._filament_metadata_source = None
     queue._control_username = "tester@example.com"
     queue._control_user_id = "user-123"
     queue._debug_log_payloads = False
@@ -144,6 +147,35 @@ def test_forward_to_ha_tracks_filament_state_from_material_change_mode():
     assert state["raw_value"] == 0
     assert state["progress"] == 0
     assert state["step_len"] == 0
+
+
+def test_filament_state_includes_gcode_vendor_and_type():
+    global ha_updates, history_calls, timelapse_calls, events
+    ha_updates, history_calls, timelapse_calls, events = [], [], [], []
+    queue = _queue()
+
+    queue.set_gcode_filament_info(vendor="Sunlu", type="PETG")
+    queue.mark_pending_print_start("part_0.2mm_PETG_Anker_M5.gcode")
+    state = queue.get_state()["filament"]
+
+    assert state["material_label"] == "Sunlu PETG"
+    assert state["vendor"] == "Sunlu"
+    assert state["type"] == "PETG"
+    assert state["metadata_source"] == "gcode"
+
+
+def test_filament_state_infers_type_from_filename():
+    global ha_updates, history_calls, timelapse_calls, events
+    ha_updates, history_calls, timelapse_calls, events = [], [], [], []
+    queue = _queue()
+
+    queue.mark_pending_print_start("part_0.2mm_PETG_Anker_M5.gcode")
+    state = queue.get_state()["filament"]
+
+    assert state["material_label"] == "PETG"
+    assert state["vendor"] is None
+    assert state["type"] == "PETG"
+    assert state["metadata_source"] == "filename"
 
 
 def test_handle_notification_tracks_filament_changing_state():

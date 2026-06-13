@@ -534,6 +534,7 @@ $(function () {
 
     const _filamentStatus = {
         label: "Unknown",
+        materialLabel: null,
         detail: null,
         issue: null,
         pauseReason: null,
@@ -583,12 +584,12 @@ $(function () {
         const value = String(label || "Unknown");
         el.text(value);
         el.removeClass("text-success text-warning text-danger text-muted");
-        if (value === "Loaded") {
-            el.addClass("text-success");
-        } else if (value === "Not Loaded") {
+        if (value === "Not Loaded") {
             el.addClass("text-danger");
         } else if (value === "Changing") {
             el.addClass("text-warning");
+        } else if (/loaded$/i.test(value)) {
+            el.addClass("text-success");
         } else {
             el.addClass("text-muted");
         }
@@ -619,6 +620,11 @@ $(function () {
             label = "Unknown";
             detail = detail || "Filament presence cannot be confirmed until the printer starts printing.";
             detailTone = "muted";
+        }
+        if (label === "Loaded") {
+            label = _filamentStatus.materialLabel
+                ? `${_filamentStatus.materialLabel} - Loaded`
+                : "Unknown Filament loaded";
         }
         if (!detail && pausedForFilament && _filamentStatus.label === "Loaded") {
             detail = "Filament loaded. Resume the print when ready.";
@@ -1047,6 +1053,7 @@ $(function () {
 
         const filament = data.filament || {};
         _filamentStatus.label = String(filament.label || "Unknown");
+        _filamentStatus.materialLabel = filament.material_label || null;
         _filamentStatus.detail = filament.detail || null;
         _filamentStatus.issue = filament.issue || null;
         _filamentStatus.pauseReason = filament.pause_reason_label || null;
@@ -1736,6 +1743,7 @@ $(function () {
             updateFanSpeed(null);
             $("#print-layer").text("0 / 0");
             _filamentStatus.label = "Unknown";
+            _filamentStatus.materialLabel = null;
             _filamentStatus.detail = null;
             _filamentStatus.issue = null;
             _filamentStatus.pauseReason = null;

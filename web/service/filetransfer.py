@@ -10,7 +10,7 @@ from libflagship.ppppapi import FileUploadInfo, PPPPError
 
 import cli.util
 import cli.pppp
-from cli.util import patch_gcode_time, extract_layer_count
+from cli.util import patch_gcode_time, extract_filament_info, extract_layer_count
 
 log = logging.getLogger(__name__)
 
@@ -57,15 +57,26 @@ class FileTransferService(Service):
         archive_info=None,
     ):
         layer_count = extract_layer_count(raw)
+        filament_info = extract_filament_info(raw)
         data = patch_gcode_time(raw)
         start_print_flag = bool(start_print)
-        if layer_count is not None:
+        if layer_count is not None or filament_info:
             try:
                 with borrow_mqtt(printer_index) as mqtt:
-                    mqtt.set_gcode_layer_count(layer_count)
-                log.info(f"GCode layer count from header: {layer_count}")
+                    if layer_count is not None:
+                        mqtt.set_gcode_layer_count(layer_count)
+                    if filament_info:
+                        mqtt.set_gcode_filament_info(**filament_info)
+                if layer_count is not None:
+                    log.info(f"GCode layer count from header: {layer_count}")
+                if filament_info:
+                    log.info(
+                        "GCode filament metadata: vendor=%r type=%r",
+                        filament_info.get("vendor"),
+                        filament_info.get("type"),
+                    )
             except Exception as e:
-                log.warning(f"Could not store layer count in mqttqueue: {e}")
+                log.warning(f"Could not store GCode metadata in mqttqueue: {e}")
         user_id = "-"
         try:
             with app.config["config"].open() as cfg:
