@@ -416,33 +416,27 @@
                         </div>
                         <div class="print-telemetry-grid">
                             <div class="print-telemetry-item">
-                                <div class="d-flex align-items-center gap-2">
+                                <div class="print-telemetry-heading">
                                     {{ macro.bi_icon("layers-half", class="print-telemetry-icon") }}
-                                    <div>
-                                        <div class="print-telemetry-label">Layer</div>
-                                        <div id="print-layer" class="print-telemetry-value">0 / 0</div>
-                                    </div>
+                                    <div class="print-telemetry-label">Layer</div>
                                 </div>
+                                <div id="print-layer" class="print-telemetry-value">0 / 0</div>
                             </div>
                             <div class="print-telemetry-item">
-                                <div class="d-flex align-items-center gap-2">
+                                <div class="print-telemetry-heading">
                                     {{ macro.bi_icon("speedometer", class="print-telemetry-icon") }}
-                                    <div>
-                                        <div class="print-telemetry-label">Speed</div>
-                                        <div id="print-speed" class="print-telemetry-value">0 mm/s</div>
-                                    </div>
+                                    <div class="print-telemetry-label">Speed</div>
                                 </div>
+                                <div id="print-speed" class="print-telemetry-value print-telemetry-value-speed">0 mm/s</div>
                             </div>
                             <div class="print-telemetry-item">
-                                <div class="d-flex align-items-center gap-2">
+                                <div class="print-telemetry-heading">
                                     {{ macro.bi_icon("fan", class="print-telemetry-icon") }}
-                                    <div class="flex-grow-1">
-                                        <div class="print-telemetry-label">Fan</div>
-                                        <div id="fan-speed" class="print-telemetry-value">– %</div>
-                                        <div class="fan-speed-meter" aria-hidden="true">
-                                            <span id="fan-speed-meter-fill"></span>
-                                        </div>
-                                    </div>
+                                    <div class="print-telemetry-label">Fan</div>
+                                </div>
+                                <div id="fan-speed" class="print-telemetry-value">– %</div>
+                                <div class="fan-speed-meter" aria-hidden="true">
+                                    <span id="fan-speed-meter-fill"></span>
                                 </div>
                             </div>
                         </div>

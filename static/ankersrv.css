@@ -112,6 +112,13 @@ code {
     background: var(--bs-tertiary-bg);
 }
 
+.print-telemetry-heading {
+    display: flex;
+    align-items: center;
+    gap: 0.35rem;
+    margin-bottom: 0.25rem;
+}
+
 .print-telemetry-label {
     color: var(--bs-secondary-color);
     font-size: 0.72rem;
@@ -123,6 +130,10 @@ code {
     font-size: 0.95rem;
     font-weight: 650;
     white-space: nowrap;
+}
+
+.print-telemetry-value-speed {
+    font-size: 0.86rem;
 }
 
 .print-telemetry-icon {
