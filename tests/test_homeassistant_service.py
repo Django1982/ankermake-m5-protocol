@@ -102,10 +102,11 @@ def test_homeassistant_publish_discovery_emits_expected_entities():
 
     topics = [topic for topic, *_ in client.published]
     assert "ha/sensor/ankerctl_SN123/print_progress/config" in topics
+    assert "ha/sensor/ankerctl_SN123/fan_speed/config" in topics
     assert "ha/binary_sensor/ankerctl_SN123/mqtt_connected/config" in topics
     assert "ha/switch/ankerctl_SN123/light/config" in topics
     assert "ha/camera/ankerctl_SN123/camera/config" in topics
-    assert len(client.published) == 15
+    assert len(client.published) == 16
 
 
 def test_homeassistant_on_connect_and_light_command(monkeypatch):

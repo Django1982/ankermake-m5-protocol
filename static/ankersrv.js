@@ -74,6 +74,14 @@ $(function () {
         return Number.isFinite(Number(temp)) ? `${Math.round(Number(temp))}°C` : "--";
     }
 
+    function updateFanSpeed(value) {
+        const parsed = Number(value);
+        const available = value !== null && value !== "" && Number.isFinite(parsed);
+        const percent = available ? Math.max(0, Math.min(100, Math.round(parsed))) : 0;
+        $("#fan-speed").text(available ? `${percent} %` : "– %");
+        $("#fan-speed-meter-fill").css("width", `${percent}%`);
+    }
+
     /**
      * Calculate the percentage between two numbers
      * @param {number} layer
@@ -1064,6 +1072,9 @@ $(function () {
                 bedTarget: temperature.bed_target,
             });
         }
+        if (Object.prototype.hasOwnProperty.call(data, "telemetry")) {
+            updateFanSpeed((data.telemetry || {}).fan_speed);
+        }
         applyCameraRuntimeState(data.camera || {});
 
         if (data.print && data.print.state !== undefined) {
@@ -1629,10 +1640,13 @@ $(function () {
                     });
                 }
                 pushTempData("bed", getTemp(data.currentTemp), getTemp(data.targetTemp));
+            } else if (data.commandType == 1005) {
+                // Returns part cooling fan speed as a percentage.
+                updateFanSpeed(data.value);
             } else if (data.commandType == 1006) {
                 // Returns Print Speed
                 const X = getSpeedFactor(data.value);
-                $("#print-speed").text(`${data.value}mm/s ${X}`);
+                $("#print-speed").text(`${data.value} mm/s ${X}`);
             } else if (data.commandType == 1007) {
                 // auto_leveling: value = current probe point (1 center + 7×7 = 50 points total)
                 const point = data.value;
@@ -1718,7 +1732,8 @@ $(function () {
                 bedCurrent: null,
                 bedTarget: null,
             });
-            $("#print-speed").text("0mm/s");
+            $("#print-speed").text("0 mm/s");
+            updateFanSpeed(null);
             $("#print-layer").text("0 / 0");
             _filamentStatus.label = "Unknown";
             _filamentStatus.detail = null;

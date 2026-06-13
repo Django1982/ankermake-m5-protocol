@@ -169,6 +169,7 @@ class MqttQueue(Service):
         self._nozzle_temp_updated_at = 0.0
         self._bed_temp = None
         self._bed_temp_target = None
+        self._fan_speed = None
         self._z_offset_steps = None
         self._z_offset_updated_at = 0.0
         self._z_offset_seq = 0
@@ -1237,9 +1238,18 @@ class MqttQueue(Service):
                 self._bed_temp_target = self._normalize_temp(target)
                 ha_updates["bed_temp_target"] = self._bed_temp_target
 
+        # Part cooling fan speed (command 1005 = 0x03ed), reported as percent.
+        elif command_type == MqttMsgType.ZZ_MQTT_CMD_FAN_SPEED:
+            speed_raw = payload.get("value") if "value" in payload else payload.get("speed")
+            speed = self._safe_int(speed_raw)
+            if speed is not None:
+                self._fan_speed = max(0, min(100, speed))
+                ha_updates["fan_speed"] = self._fan_speed
+
         # Print speed (command 1006 = 0x03ee)
         elif command_type == MqttMsgType.ZZ_MQTT_CMD_PRINT_SPEED:
-            speed = self._safe_int(payload.get("value") or payload.get("speed"))
+            speed_raw = payload.get("value") if "value" in payload else payload.get("speed")
+            speed = self._safe_int(speed_raw)
             if speed is not None:
                 ha_updates["print_speed"] = speed
 
@@ -1689,6 +1699,9 @@ class MqttQueue(Service):
                 "nozzle_target": self._nozzle_temp_target,
                 "bed": self._bed_temp,
                 "bed_target": self._bed_temp_target,
+            },
+            "telemetry": {
+                "fan_speed": self._fan_speed,
             },
             "z_offset": self.get_z_offset_state(),
             "filament": {

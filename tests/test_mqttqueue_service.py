@@ -44,6 +44,7 @@ def _queue():
     queue._nozzle_temp_target = None
     queue._bed_temp = None
     queue._bed_temp_target = None
+    queue._fan_speed = None
     queue._filament_state = "unknown"
     queue._filament_change_value = None
     queue._filament_change_progress = None
@@ -109,6 +110,20 @@ def test_forward_to_ha_accepts_zero_temperature_targets():
     assert queue._bed_temp_target == 0
     assert {"nozzle_temp": 205, "nozzle_temp_target": 0} in ha_updates
     assert {"bed_temp": 60, "bed_temp_target": 0} in ha_updates
+
+
+def test_forward_to_ha_tracks_fan_speed_percent():
+    global ha_updates, history_calls, timelapse_calls, events
+    ha_updates, history_calls, timelapse_calls, events = [], [], [], []
+    queue = _queue()
+
+    queue._forward_to_ha({"commandType": 1005, "value": 0})
+    assert queue.get_state()["telemetry"]["fan_speed"] == 0
+    assert {"fan_speed": 0} in ha_updates
+
+    queue._forward_to_ha({"commandType": 1005, "value": 125})
+    assert queue.get_state()["telemetry"]["fan_speed"] == 100
+    assert {"fan_speed": 100} in ha_updates
 
 
 def test_forward_to_ha_tracks_filament_state_from_material_change_mode():

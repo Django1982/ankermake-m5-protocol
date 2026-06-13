@@ -57,6 +57,7 @@ class HomeAssistantService:
             "nozzle_temp_target": None,
             "bed_temp": None,
             "bed_temp_target": None,
+            "fan_speed": None,
             "print_speed": None,
             "print_layer": None,
             "print_filename": None,
@@ -297,7 +298,7 @@ class HomeAssistantService:
 
         Accepts keyword arguments matching state keys:
             print_progress, print_status, nozzle_temp, nozzle_temp_target,
-            bed_temp, bed_temp_target, print_speed, print_layer,
+            bed_temp, bed_temp_target, fan_speed, print_speed, print_layer,
             print_filename, time_elapsed, time_remaining,
             mqtt_connected, pppp_connected, light
         """
@@ -416,6 +417,13 @@ class HomeAssistantService:
                 "unit": "\u00b0C",
                 "device_class": "temperature",
                 "value_template": "{{ value_json.bed_temp_target | default(0) }}",
+            },
+            {
+                "id": "fan_speed",
+                "name": "Part Cooling Fan",
+                "unit": "%",
+                "icon": "mdi:fan",
+                "value_template": "{{ value_json.fan_speed | default(0) }}",
             },
             {
                 "id": "print_speed",
