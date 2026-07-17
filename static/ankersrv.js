@@ -1380,6 +1380,8 @@ $(function () {
     }
 
     const Z_OFFSET_STEP_MM = 0.01;
+    const Z_OFFSET_MIN_MM = -2.0;
+    const Z_OFFSET_MAX_MM = 2.0;
     let _zOffsetCurrentMm = null;
 
     function setZOffsetControlsEnabled(enabled) {
@@ -1394,7 +1396,8 @@ $(function () {
         if (!Number.isFinite(number)) {
             return null;
         }
-        return Math.round(number * 100) / 100;
+        const clamped = Math.min(Z_OFFSET_MAX_MM, Math.max(Z_OFFSET_MIN_MM, number));
+        return Math.round(clamped * 100) / 100;
     }
 
     function extractZOffsetMm(payload) {
@@ -2886,9 +2889,11 @@ $(function () {
     // ------------------------------------------------------------------
 
     /**
-     * localStorage key and cap for bed level snapshots.
+     * localStorage key (scoped per printer) and cap for bed level snapshots.
      */
-    const BED_SNAP_KEY = "ankerctl_bed_snapshots";
+    function bedSnapKey() {
+        return `ankerctl_bed_snapshots_p${getActivePrinterIndex()}`;
+    }
     const BED_SNAP_MAX = 10;
 
     /**
@@ -2900,7 +2905,7 @@ $(function () {
     /** Load snapshots array from localStorage. */
     function bedSnapLoad() {
         try {
-            return JSON.parse(localStorage.getItem(BED_SNAP_KEY) || "[]");
+            return JSON.parse(localStorage.getItem(bedSnapKey()) || "[]");
         } catch (_) {
             return [];
         }
@@ -2908,7 +2913,7 @@ $(function () {
 
     /** Persist snapshots array to localStorage. */
     function bedSnapSave(snaps) {
-        localStorage.setItem(BED_SNAP_KEY, JSON.stringify(snaps));
+        localStorage.setItem(bedSnapKey(), JSON.stringify(snaps));
     }
 
     /**
@@ -3623,6 +3628,70 @@ $(function () {
     });
 
     loadCameraSettings();
+
+    /**
+     * Hotend setting (Setup -> Printer): all-metal hotend raises the nozzle limit to 300°C.
+     * Stored per-printer in the filament-service settings, but managed independently here.
+     */
+    function setHotendStatus(message, kind = "muted") {
+        const statusEl = document.getElementById("printer-hotend-status");
+        if (!statusEl) {
+            return;
+        }
+        statusEl.textContent = message;
+        statusEl.className = `text-${kind} small mt-2`;
+    }
+
+    async function loadHotendSettings() {
+        const checkboxEl = document.getElementById("printer-all-metal-hotend");
+        if (!checkboxEl) {
+            return;
+        }
+        try {
+            const resp = await fetch(withActivePrinterQuery("/api/settings/filament-service"));
+            const data = await resp.json().catch(() => ({}));
+            if (!resp.ok) {
+                throw new Error(data.error || `HTTP ${resp.status}`);
+            }
+            checkboxEl.checked = !!(data.filament_service || {}).all_metal_hotend;
+        } catch (err) {
+            setHotendStatus(`Failed to load hotend setting: ${err.message || err}`, "danger");
+        }
+    }
+
+    $("#printer-save-hotend-btn").on("click", async function () {
+        const btn = $(this);
+        const checkboxEl = document.getElementById("printer-all-metal-hotend");
+        btn.prop("disabled", true);
+        try {
+            const resp = await fetch(withActivePrinterQuery("/api/settings/filament-service"), {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({
+                    filament_service: { all_metal_hotend: !!checkboxEl?.checked },
+                }),
+            });
+            const data = await resp.json().catch(() => ({}));
+            if (!resp.ok) {
+                throw new Error(data.error || `HTTP ${resp.status}`);
+            }
+            if (checkboxEl) {
+                checkboxEl.checked = !!(data.filament_service || {}).all_metal_hotend;
+            }
+            setHotendStatus("Hotend setting saved.", "success");
+        } catch (err) {
+            setHotendStatus(`Failed to save hotend setting: ${err.message || err}`, "danger");
+        } finally {
+            btn.prop("disabled", false);
+        }
+    });
+
+    // Reload the per-printer hotend setting when the active printer changes (navbar switch).
+    document.addEventListener("printerChanged", function () {
+        loadHotendSettings();
+    });
+
+    loadHotendSettings();
 
     /**
      * GCode Console
@@ -6488,7 +6557,7 @@ $(function () {
 
     async function filamentLoadSwapSettings() {
         try {
-            const resp = await fetch("/api/settings/filament-service");
+            const resp = await fetch(withActivePrinterQuery("/api/settings/filament-service"));
             const data = await resp.json();
             if (!resp.ok) {
                 filamentSetSwapSettingsStatus(

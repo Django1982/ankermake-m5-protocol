@@ -9,6 +9,9 @@ from libflagship.util import unhex, enhex
 DEFAULT_UPLOAD_RATE_MBPS = 10
 UPLOAD_RATE_MBPS_CHOICES = (5, 10, 25, 50, 100)
 MQTT_CA_CERT_ENVVAR = "ANKERCTL_MQTT_CA_CERT"
+HOTEND_STANDARD_NOZZLE_MAX_C = 260
+HOTEND_ALL_METAL_NOZZLE_MAX_C = 300
+HOTEND_BED_MAX_C = 100
 
 
 def default_apprise_config():
@@ -87,6 +90,7 @@ def default_filament_service_config():
             "FILAMENT_SWAP_HOME_PAUSE_S",
             os.getenv("FILAMENT_SWAP_HOME_SETTLE_S", 70),
         )),
+        "per_printer": {},
     }
 
 
