@@ -390,3 +390,158 @@ def test_printer_option_rejects_negative_values():
     result = runner.invoke(ankerctl.main, ["--printer", "-1", "config", "show"])
     assert result.exit_code != 0
     assert "is not in the range" in result.output or "Invalid value" in result.output
+
+
+def test_pppp_print_file_stops_session_on_invalid_upload_rate(monkeypatch, tmp_path):
+    """Regression: api.stop() must run even when --upload-rate-mbps
+    validation fails, so the PPPP session isn't leaked."""
+    runner = CliRunner()
+    fake_config = FakeConfigContext(printers=[SimpleNamespace(name="p0")])
+    opens = []
+    stops = []
+
+    class FakeApi:
+        def stop(self):
+            stops.append(True)
+
+    def fake_pppp_open(config, printer_index, dumpfile=None):
+        opens.append(True)
+        return FakeApi()
+
+    monkeypatch.setattr("ankerctl.cli.config.configmgr", lambda: fake_config)
+    monkeypatch.setattr("ankerctl.cli.logfmt.setup_logging", lambda level, log_dir=None: None)
+    monkeypatch.setattr("ankerctl.Environment.upgrade_config_if_needed", lambda self: None)
+    monkeypatch.setattr("ankerctl.Environment.load_config", lambda self, required=True: None)
+    monkeypatch.setattr("ankerctl.cli.pppp.pppp_open", fake_pppp_open)
+
+    gcode = tmp_path / "job.gcode"
+    gcode.write_bytes(b"G28\n")
+
+    result = runner.invoke(
+        ankerctl.main,
+        ["pppp", "print-file", str(gcode), "--upload-rate-mbps", "7"],
+    )
+
+    assert result.exit_code != 0
+    assert len(stops) == len(opens)
+
+
+def test_pppp_capture_video_stops_session_after_capture(monkeypatch, tmp_path):
+    """Regression: capture-video must call api.stop() after capture completes."""
+    runner = CliRunner()
+    fake_config = FakeConfigContext(printers=[SimpleNamespace(name="p0")])
+    sends = []
+    stops = []
+
+    timeouts = []
+
+    class FakeApi:
+        def send_xzyh(self, data, cmd=None, timeout=None):
+            sends.append(json.loads(data))
+            timeouts.append(timeout)
+
+        def recv_xzyh(self, chan=None):
+            return SimpleNamespace(data=b"x" * 2048)
+
+        def stop(self):
+            stops.append(True)
+
+    monkeypatch.setattr("ankerctl.cli.config.configmgr", lambda: fake_config)
+    monkeypatch.setattr("ankerctl.cli.logfmt.setup_logging", lambda level, log_dir=None: None)
+    monkeypatch.setattr("ankerctl.Environment.upgrade_config_if_needed", lambda self: None)
+    monkeypatch.setattr("ankerctl.Environment.load_config", lambda self, required=True: None)
+    monkeypatch.setattr("ankerctl.cli.pppp.pppp_open", lambda *args, **kwargs: FakeApi())
+
+    out = tmp_path / "out.h264"
+    result = runner.invoke(
+        ankerctl.main,
+        ["pppp", "capture-video", "--max-size", "1kb", str(out)],
+    )
+
+    assert result.exit_code == 0
+    assert stops == [True]
+    assert len(sends) == 2  # START_LIVE + CLOSE_LIVE
+    # Regression: both control-command sends must pass an explicit timeout,
+    # otherwise a silently-dropped ACK blocks Channel.write() forever (same
+    # bug class as the file-upload handshake hang).
+    assert all(t is not None for t in timeouts)
+    assert out.read_bytes() == b"x" * 2048
+
+
+def test_mqtt_rename_printer_rejects_empty_name(monkeypatch):
+    """Regression: an empty printer name must be rejected before connecting."""
+    runner = CliRunner()
+    fake_config = FakeConfigManager()
+    opened = []
+
+    monkeypatch.setattr("ankerctl.cli.config.configmgr", lambda: fake_config)
+    monkeypatch.setattr("ankerctl.cli.logfmt.setup_logging", lambda level, log_dir=None: None)
+    monkeypatch.setattr("ankerctl.Environment.upgrade_config_if_needed", lambda self: None)
+    monkeypatch.setattr("ankerctl.Environment.load_config", lambda self, required=True: None)
+    monkeypatch.setattr("ankerctl.cli.mqtt.mqtt_open", lambda *args, **kwargs: opened.append(True))
+
+    result = runner.invoke(ankerctl.main, ["mqtt", "rename-printer", ""])
+
+    assert result.exit_code == 1
+    assert opened == []
+
+
+def test_config_decode_redacts_auth_token_by_default(monkeypatch, tmp_path):
+    """Regression: full auth_token/user_id must not appear in default output."""
+    runner = CliRunner()
+    fake_config = FakeConfigManager()
+    cache = {
+        "auth_token": "SECRETTOKEN1234567890",
+        "user_id": "USERID9876543210",
+        "email": "user@example.com",
+    }
+
+    monkeypatch.setattr("ankerctl.cli.config.configmgr", lambda: fake_config)
+    monkeypatch.setattr("ankerctl.cli.logfmt.setup_logging", lambda level, log_dir=None: None)
+    monkeypatch.setattr("ankerctl.libflagship.logincache.load", lambda data: {"data": dict(cache)})
+
+    login = tmp_path / "login.json"
+    login.write_bytes(b"irrelevant")
+
+    redacted = runner.invoke(ankerctl.main, ["config", "decode", str(login)])
+    full = runner.invoke(ankerctl.main, ["config", "decode", "--show-secrets", str(login)])
+
+    assert redacted.exit_code == 0
+    assert "SECRETTOKEN1234567890" not in redacted.output
+    assert "USERID9876543210" not in redacted.output
+    assert "SECRETTOKE...<REDACTED>" in redacted.output
+    assert "USERID9876...<REDACTED>" in redacted.output
+    assert "user@example.com" in redacted.output
+
+    assert full.exit_code == 0
+    assert "SECRETTOKEN1234567890" in full.output
+
+
+def test_config_login_warns_when_password_passed_positionally(monkeypatch, caplog):
+    """Regression: a warning must be logged when password is passed positionally."""
+    import logging
+
+    runner = CliRunner()
+    fake_config = FakeConfigContext(printers=[])
+    imported = []
+
+    monkeypatch.setattr("ankerctl.cli.config.configmgr", lambda: fake_config)
+    monkeypatch.setattr("ankerctl.cli.logfmt.setup_logging", lambda level, log_dir=None: None)
+    monkeypatch.setattr(
+        "ankerctl.cli.config.fetch_config_by_login",
+        lambda email, password, region, insecure, captcha_id=None, captcha_answer=None: {"auth_token": "abc"},
+    )
+    monkeypatch.setattr(
+        "ankerctl.cli.config.import_config_from_server",
+        lambda config, login, insecure: imported.append(login),
+    )
+
+    with caplog.at_level(logging.WARNING, logger="main"):
+        result = runner.invoke(
+            ankerctl.main,
+            ["config", "login", "DE", "user@example.com", "somepassword"],
+        )
+
+    assert result.exit_code == 0
+    assert imported == [{"auth_token": "abc"}]
+    assert any("shell history" in record.message for record in caplog.records)

@@ -170,6 +170,17 @@ def test_channel_write_poll_and_acknowledge():
     assert chan.txqueue == []
 
 
+def test_channel_write_raises_timeout_instead_of_blocking_forever_when_never_acked():
+    # Regression: Channel.write(block=True) with timeout=None waits on a bare
+    # Event.wait() with no deadline (see the `else: self.wait()` branch), so a
+    # silently-dropped outgoing packet blocks forever. Passing an explicit
+    # timeout must take the bounded-deadline branch instead and raise.
+    chan = Channel(index=0)
+
+    with pytest.raises(TimeoutError, match="PPPP DRW ACK"):
+        chan.write(b"payload", block=True, timeout=0.2)
+
+
 def test_channel_can_skip_stale_receive_gap_for_realtime_streams():
     chan = Channel(index=1)
 

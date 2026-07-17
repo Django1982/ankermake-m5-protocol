@@ -188,6 +188,13 @@ code {
 
 /* Bootstrap overrides */
 
+/* Keep flash messages visible above open modals (Bootstrap stacks the
+   backdrop at z-index 1050 and modals at 1055). */
+#messages {
+    position: relative;
+    z-index: 1100;
+}
+
 .img-thumbnail {
     border: 0 none;
     padding: 0;

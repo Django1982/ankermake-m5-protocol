@@ -635,3 +635,135 @@ def test_pppp_worker_stop_safe_without_api():
     # Simulate state after a failed worker_start (no _api attribute)
     assert not hasattr(svc, "_api")
     svc.worker_stop()  # should not raise
+
+
+def test_force_close_api_sends_close_packet_when_connected():
+    """_force_close_api must notify the printer with a PktClose when the api
+    is Connected, so the printer releases its single PPPP session slot right
+    away instead of waiting out its own keepalive/timeout. This must stay a
+    best-effort, non-blocking raw UDP send (AnkerPPPPBaseApi.send()), not the
+    ack-waiting send_xzyh()/send_aabb() path, so it can't reintroduce the
+    freeze-hang this code used to guard against."""
+    from libflagship.pppp import PktClose
+    from web.service.pppp import PPPPService
+
+    sent = []
+
+    class FakeSock:
+        def shutdown(self, how):
+            pass
+
+        def close(self):
+            sent.append("sock_closed")
+
+    fake_api = SimpleNamespace(
+        state=PPPPState.Connected,
+        sock=FakeSock(),
+        send=lambda pkt: sent.append(pkt),
+    )
+
+    svc = PPPPService.__new__(PPPPService)
+    svc._api = fake_api
+
+    svc._force_close_api()
+
+    assert any(isinstance(item, PktClose) for item in sent)
+    assert "sock_closed" in sent
+    assert not hasattr(svc, "_api")
+    assert fake_api.state == PPPPState.Disconnected
+
+
+def test_force_close_api_skips_close_packet_when_not_connected():
+    """When the api is already Disconnected (e.g. mid freeze-recovery, the
+    exact scenario the original 'never send close' comment was protecting
+    against), _force_close_api must not attempt a send — sending would trip
+    AnkerPPPPBaseApi.send()'s own ConnectionError guard for Idle/Disconnected
+    states — and must still tear the socket down cleanly without raising."""
+    from web.service.pppp import PPPPService
+
+    sent = []
+
+    class FakeSock:
+        def shutdown(self, how):
+            pass
+
+        def close(self):
+            sent.append("sock_closed")
+
+    def _unexpected_send(pkt):
+        raise AssertionError("send() must not be called when api is not Connected")
+
+    fake_api = SimpleNamespace(
+        state=PPPPState.Disconnected,
+        sock=FakeSock(),
+        send=_unexpected_send,
+    )
+
+    svc = PPPPService.__new__(PPPPService)
+    svc._api = fake_api
+
+    svc._force_close_api()  # should not raise
+
+    assert "sock_closed" in sent
+    assert not hasattr(svc, "_api")
+
+
+def test_force_close_api_send_failure_does_not_block_socket_teardown():
+    """A raised exception from api.send() (e.g. a transient socket error)
+    must not prevent the unconditional socket teardown that follows — that
+    teardown is the real safety net, the close-packet send is only a
+    best-effort optimization."""
+    from web.service.pppp import PPPPService
+
+    sent = []
+
+    class FakeSock:
+        def shutdown(self, how):
+            pass
+
+        def close(self):
+            sent.append("sock_closed")
+
+    def _raising_send(pkt):
+        raise OSError("network is unreachable")
+
+    fake_api = SimpleNamespace(
+        state=PPPPState.Connected,
+        sock=FakeSock(),
+        send=_raising_send,
+    )
+
+    svc = PPPPService.__new__(PPPPService)
+    svc._api = fake_api
+
+    svc._force_close_api()  # should not raise despite send() failing
+
+    assert "sock_closed" in sent
+    assert not hasattr(svc, "_api")
+
+
+def test_reserve_session_waits_full_stop_timeout_before_yielding():
+    """reserve_session must give the shared service enough time to actually
+    stop (>= 15s wait) before the file-transfer path connects — an actively
+    streaming video session can take longer than 5s to release its hold."""
+    from web.service.pppp import reserve_session
+
+    events = []
+    fake_svc = SimpleNamespace(
+        wanted=True,
+        stop=lambda: events.append(("stop", None)),
+        await_stopped=lambda timeout=None: events.append(("await_stopped", timeout)),
+        start=lambda: events.append(("start", None)),
+    )
+
+    old_svc = app.svc
+    app.svc = SimpleNamespace(svcs={"pppp": fake_svc})
+    try:
+        with reserve_session(printer_index=0):
+            events.append(("yield", None))
+    finally:
+        app.svc = old_svc
+
+    assert [name for name, _ in events] == ["stop", "await_stopped", "yield", "start"]
+    wait_timeout = dict(events)["await_stopped"]
+    assert wait_timeout is not None and wait_timeout >= 15.0

@@ -17,6 +17,8 @@ _PPPP_PROBE_ATTEMPTS = 2
 _PPPP_LAN_SEARCH_RETRIES = 3
 _PPPP_LAN_SEARCH_MIN_WINDOW = 0.35
 _PPPP_LAN_SEARCH_RETRY_GAP = 0.15
+_PPPP_OPEN_RETRY_GAP = 0.3
+_PPPP_OPEN_ATTEMPT_WINDOW = 3.0
 
 
 def _pppp_dumpfile(api, dumpfile):
@@ -27,8 +29,7 @@ def _pppp_dumpfile(api, dumpfile):
 
 
 def pppp_open(config, printer_index, timeout=None, dumpfile=None):
-    if timeout:
-        deadline = datetime.now() + timedelta(seconds=timeout)
+    deadline = datetime.now() + timedelta(seconds=timeout) if timeout else None
 
     with config.open() as cfg:
         if printer_index < 0 or printer_index >= len(cfg.printers):
@@ -38,22 +39,53 @@ def pppp_open(config, printer_index, timeout=None, dumpfile=None):
         if not ip_addr:
             raise ConnectionRefusedError("No printer IP found; ensure printer is online on the same network")
 
+    attempt = 0
+    while True:
+        attempt += 1
         api = AnkerPPPPApi.open_lan(Duid.from_string(printer.p2p_duid), host=ip_addr)
         _pppp_dumpfile(api, dumpfile)
 
-        log.info(f"Trying connect to printer {printer.name} ({printer.p2p_duid}) over pppp using ip {ip_addr}")
+        log.info(
+            f"Trying connect to printer {printer.name} ({printer.p2p_duid}) over pppp using ip {ip_addr}"
+            + (f" (attempt {attempt})" if attempt > 1 else "")
+        )
 
         api.connect_lan_search()
         api.start()
 
-        while api.state != PPPPState.Connected:
-            time.sleep(0.1)
-            if api.stopped.is_set() or (timeout and (datetime.now() > deadline)):
-                api.stop()
-                raise ConnectionRefusedError("Connection rejected by device")
+        # Cap each attempt to a sub-window of the overall deadline. A silent
+        # non-completing attempt (no CLOSE, connection just never establishes)
+        # must not consume the whole budget, or the retry loop below never
+        # gets a second attempt.
+        attempt_deadline = None
+        if deadline:
+            attempt_deadline = min(
+                deadline, datetime.now() + timedelta(seconds=_PPPP_OPEN_ATTEMPT_WINDOW)
+            )
 
-        log.info("Established pppp connection")
-        return api
+        while api.state != PPPPState.Connected and not api.stopped.is_set():
+            if attempt_deadline and datetime.now() > attempt_deadline:
+                break
+            time.sleep(0.1)
+
+        if api.state == PPPPState.Connected:
+            log.info("Established pppp connection")
+            return api
+
+        # Rejected by the printer (or timed out establishing this attempt).
+        # The printer can take a moment to free up its single PPPP session
+        # slot after a previous connection closes, so retry within the
+        # deadline instead of failing on the first rejection.
+        api.stop()
+        try:
+            api.sock.close()
+        except OSError as exc:
+            log.debug(f"PPPP socket close failed: {exc}")
+
+        if not deadline or datetime.now() >= deadline:
+            raise ConnectionRefusedError("Connection rejected by device")
+
+        time.sleep(_PPPP_OPEN_RETRY_GAP)
 
 
 def pppp_open_broadcast(dumpfile=None):
@@ -217,6 +249,29 @@ def pppp_resolve_printer_ip(config, printer, printer_index, dumpfile=None, timeo
     return ""
 
 
+def _send_xzyh_with_retry(api, data, cmd, reply_timeout, chan=0, retries=2):
+    # The printer's low-level PPPP handshake (P2P_RDY) can complete slightly
+    # before its higher-level file-transfer subsystem is ready to receive on
+    # this channel, so the very first packet sent right after a session is
+    # established can be silently dropped once in a while. Tolerate that the
+    # same way _retry_file_transfer_data() already tolerates it on chan=1.
+    attempts = retries + 1
+
+    for attempt in range(1, attempts + 1):
+        try:
+            return api.send_xzyh(data, cmd=cmd, timeout=reply_timeout)
+        except TimeoutError as exc:
+            is_drw_timeout = "PPPP DRW ACK" in str(exc)
+            if not is_drw_timeout or attempt >= attempts:
+                raise
+
+            log.warning(
+                f"Retrying file transfer handshake send after transport timeout "
+                f"(attempt {attempt + 1}/{attempts})"
+            )
+            api.reset_chan_tx(chan=chan)
+
+
 def _pppp_send_file_handshake(api, fui, reply_timeout=2.0):
     file_uuid = (fui.machine_id or "").strip()
     if not file_uuid or file_uuid == "-":
@@ -233,7 +288,9 @@ def _pppp_send_file_handshake(api, fui, reply_timeout=2.0):
     }
 
     log.info("Requesting file transfer..")
-    api.send_xzyh(json.dumps(payload).encode(), cmd=P2PCmdType.P2P_SEND_FILE)
+    _send_xzyh_with_retry(
+        api, json.dumps(payload).encode(), cmd=P2PCmdType.P2P_SEND_FILE, reply_timeout=reply_timeout, chan=0
+    )
 
     try:
         reply = api.recv_xzyh(chan=0, timeout=reply_timeout)
@@ -242,14 +299,14 @@ def _pppp_send_file_handshake(api, fui, reply_timeout=2.0):
 
     if not reply:
         log.warning("No P2P_SEND_FILE reply; falling back to legacy handshake")
-        api.send_xzyh(file_uuid[:16].encode(), cmd=P2PCmdType.P2P_SEND_FILE)
+        api.send_xzyh(file_uuid[:16].encode(), cmd=P2PCmdType.P2P_SEND_FILE, timeout=reply_timeout)
         return
 
     if reply.data:
         code = int.from_bytes(reply.data[:4], "little", signed=False)
         if code != 0:
             log.warning(f"P2P_SEND_FILE reply error 0x{code:08x}; falling back to legacy handshake")
-            api.send_xzyh(file_uuid[:16].encode(), cmd=P2PCmdType.P2P_SEND_FILE)
+            api.send_xzyh(file_uuid[:16].encode(), cmd=P2PCmdType.P2P_SEND_FILE, timeout=reply_timeout)
 
 
 def _retry_file_transfer_data(api, chunk, pos, reply_timeout, retries=2):

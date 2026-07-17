@@ -149,12 +149,16 @@ class MqttQueue(Service):
                 printer = cfg.printers[self.printer_index]
                 printer_sn = getattr(printer, "sn", None)
                 printer_name = getattr(printer, "name", None) or "AnkerMake M5"
-        self._ha = HomeAssistantService(
-            app.config["config"],
-            printer_sn=printer_sn,
-            printer_name=printer_name,
-            printer_index=self.printer_index,
-        )
+        try:
+            self._ha = HomeAssistantService(
+                app.config["config"],
+                printer_sn=printer_sn,
+                printer_name=printer_name,
+                printer_index=self.printer_index,
+            )
+        except Exception as err:
+            log.error(f"HomeAssistantService init failed, HA integration disabled: {err}", exc_info=True)
+            self._ha = None
         # HomeAssistantService.__init__ calls reload_config() which calls start()
         # when enabled, so no explicit start() call is needed here.
         self._printer_name = printer_name or "AnkerMake M5"
@@ -227,7 +231,12 @@ class MqttQueue(Service):
             app.config["insecure"],
             mqtt_ca_cert,
         )
-        self._reset_print_state()
+        # A reconnect is a connection-layer event, not the end of a print: the
+        # printer's own state (task_id, filename, progress) self-heals from the
+        # next live telemetry, but filament vendor/type has no telemetry source
+        # to re-derive from (it's a one-shot value pushed from the GCode header
+        # at upload time), so it must not be wiped here or it is lost for good.
+        self._reset_print_state(preserve_filament_metadata=True)
         self._ha.start()
         self._ha.update_state(mqtt_connected=True)
         self._last_query = 0
@@ -236,7 +245,7 @@ class MqttQueue(Service):
             time.monotonic() + TIMELAPSE_START_PROMPT_BOOT_WINDOW_SEC
         )
 
-    def _reset_print_state(self):
+    def _reset_print_state(self, preserve_filament_metadata=False):
         self._state = PrintState.IDLE
         self._last_state_value = 0
         self._print_started_at = None
@@ -257,9 +266,10 @@ class MqttQueue(Service):
         self._last_print_schedule_filename = None
         self._last_print_schedule_seen_at = 0.0
         self._pending_prepare_state_logged = False
-        self._filament_vendor = None
-        self._filament_type = None
-        self._filament_metadata_source = None
+        if not preserve_filament_metadata:
+            self._filament_vendor = None
+            self._filament_type = None
+            self._filament_metadata_source = None
         self._clear_timelapse_start_offer()
         self._pause_reason = None
         self._filament_runout_pending = False
@@ -937,6 +947,8 @@ class MqttQueue(Service):
                 self._print_state_event.set()
 
     def worker_stop(self):
+        if getattr(self, "_timelapse", None):
+            self._timelapse.handle_mqtt_service_stopped()
         self._ha.update_state(mqtt_connected=False)
         self._ha.stop()
         if hasattr(self, "client"):
@@ -1928,6 +1940,9 @@ class MqttQueue(Service):
                 "totalLayer": total_layers,
             }
             self.notify(sim_payload)
+
+        else:
+            log.warning(f"simulate_event: unknown event type {event_type!r}")
 
     def send_gcode(self, gcode):
         if not gcode:
