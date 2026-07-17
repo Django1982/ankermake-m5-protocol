@@ -330,8 +330,10 @@ def extract_layer_count(data: bytes) -> int | None:
 
     for line in text.splitlines():
         line = line.strip()
+        if not line:
+            continue  # Blank lines (e.g. around thumbnail blocks) don't end the header
         if not line.startswith(";"):
-            break  # Header ends at first non-comment line
+            break  # Header ends at first non-comment content line
         for pattern in _LAYER_COUNT_PATTERNS:
             m = pattern.match(line)
             if m:
@@ -340,3 +342,30 @@ def extract_layer_count(data: bytes) -> int | None:
     # Fallback: count ;LAYER_CHANGE markers (PrusaSlicer)
     count = text.count(";LAYER_CHANGE")
     return count if count > 0 else None
+
+
+_FILAMENT_METADATA_PATTERNS = {
+    "type": re.compile(r"^;\s*filament_type\s*=\s*(.+?)\s*$", re.IGNORECASE),
+    "vendor": re.compile(r"^;\s*filament_vendor\s*=\s*(.+?)\s*$", re.IGNORECASE),
+}
+
+
+def extract_filament_info(data: bytes) -> dict:
+    """Extract slicer filament type and vendor comments from GCode."""
+    try:
+        text = data.decode("utf-8", errors="replace")
+    except Exception:
+        return {}
+
+    result = {}
+    for line in text.splitlines():
+        for key, pattern in _FILAMENT_METADATA_PATTERNS.items():
+            match = pattern.match(line.strip())
+            if not match:
+                continue
+            value = match.group(1).strip().strip('"').strip()
+            if value:
+                result[key] = value
+        if len(result) == len(_FILAMENT_METADATA_PATTERNS):
+            break
+    return result

@@ -46,7 +46,7 @@ def test_config_decode_and_import_cli(monkeypatch, tmp_path):
     imported_cli = runner.invoke(ankerctl.main, ["config", "import", str(login_file)])
 
     assert decode.exit_code == 0
-    assert '"auth_token": "abc"' in decode.output
+    assert '"auth_token": "abc...<REDACTED>"' in decode.output
     assert imported_cli.exit_code == 0
     assert imported == [(fake_config, {"auth_token": "abc", "email": "user@example.com"}, False)]
 

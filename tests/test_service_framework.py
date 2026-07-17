@@ -1,6 +1,7 @@
+import time
 from contextlib import contextmanager
 from queue import Queue
-from threading import Timer
+from threading import Event, Thread, Timer
 from types import SimpleNamespace
 
 import pytest
@@ -258,6 +259,53 @@ def test_service_start_failure_logging_suppresses_duplicate_tracebacks(monkeypat
         "DummyService: Failed to start worker: No printer IP found. Retrying in 1 second. (seen 5 times)",
     )
     assert len(records) == 3
+
+
+def test_concurrent_restart_leaves_service_running():
+    """Regression: two overlapping restart() calls must not leave the service
+    stopped. Without serialization, the second caller snapshots `wanted` while
+    the first caller's stop() is in flight (stale False), then its own
+    unconditional stop() lands after the first caller's start() — genuinely
+    stopping the service — and the stale snapshot skips the restart."""
+    svc = DummyService()
+    orig_stop = svc.stop
+    first_stop_done = Event()
+
+    def instrumented_stop():
+        if first_stop_done.is_set():
+            # Second restart's stop(): wait until the first restart has brought
+            # the service back up, forcing the racy interleaving deterministically.
+            deadline = time.monotonic() + 5.0
+            while time.monotonic() < deadline:
+                if svc.state == RunState.Running and svc.wanted:
+                    break
+                time.sleep(0.01)
+        orig_stop()
+        first_stop_done.set()
+
+    try:
+        svc.start()
+        svc.await_ready()
+        svc.stop = instrumented_stop
+
+        def second_restart():
+            first_stop_done.wait(timeout=5.0)
+            svc.restart()
+
+        thread_a = Thread(target=svc.restart, daemon=True)
+        thread_b = Thread(target=second_restart, daemon=True)
+        thread_a.start()
+        thread_b.start()
+        thread_a.join(timeout=15.0)
+        thread_b.join(timeout=15.0)
+
+        assert not thread_a.is_alive()
+        assert not thread_b.is_alive()
+        assert svc.wanted is True
+        assert svc.state == RunState.Running
+    finally:
+        svc.stop = orig_stop
+        svc.shutdown()
 
 
 def test_service_restart_signal_default_delay():

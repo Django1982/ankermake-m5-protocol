@@ -1,3 +1,4 @@
+import threading
 from contextlib import contextmanager
 from datetime import datetime
 from types import SimpleNamespace
@@ -90,6 +91,7 @@ def _install_state(tmp_path, mqtt):
     app.svc = FakeServices(mqtt)
     app.filaments = FilamentStore(tmp_path / "filaments.db")
     app.filament_swap_state = {}
+    app.filament_swap_threads = {}
 
     return old_values, old_svc, old_filaments, old_swap
 
@@ -100,6 +102,7 @@ def _restore_state(old_values, old_svc, old_filaments, old_swap):
         app.config[key] = value
     app.filaments = old_filaments
     app.filament_swap_state = old_swap
+    app.filament_swap_threads = {}
 
 
 def test_filament_crud_and_apply_routes(tmp_path):
@@ -379,7 +382,7 @@ def test_filament_swap_routes_cover_legacy_start_confirm_and_cancel(tmp_path, mo
     app.config["config"].cfg.filament_service["swap_load_length_mm"] = 65
     background_calls = []
 
-    def fake_start_background(target, token):
+    def fake_start_background(target, token, printer_index):
         background_calls.append((target, token))
         return SimpleNamespace()
 
@@ -487,7 +490,7 @@ def test_legacy_swap_sends_heat_before_homing_when_nozzle_is_cold(tmp_path, monk
     app.config["config"].cfg.filament_service["allow_legacy_swap"] = True
     background_calls = []
 
-    def fake_start_background(target, token):
+    def fake_start_background(target, token, printer_index):
         background_calls.append((target, token))
         return SimpleNamespace()
 
@@ -590,7 +593,7 @@ def test_legacy_swap_cancel_is_allowed_while_stage_is_running(tmp_path, monkeypa
     app.config["config"].cfg.filament_service["allow_legacy_swap"] = True
     background_calls = []
 
-    def fake_start_background(target, token):
+    def fake_start_background(target, token, printer_index):
         background_calls.append((target, token))
         return SimpleNamespace()
 
@@ -627,3 +630,182 @@ def test_legacy_swap_cancel_is_allowed_while_stage_is_running(tmp_path, monkeypa
     assert state.status_code == 200
     assert state.get_json()["pending"] is False
     assert sent == ["M104 S0"]
+
+
+def test_filament_service_preheat_clamps_absurd_profile_temp(tmp_path):
+    sent = []
+    mqtt = SimpleNamespace(is_printing=False, nozzle_temp=25, send_gcode=lambda gcode: sent.append(gcode))
+    client = app.test_client()
+    old_values, old_svc, old_filaments, old_swap = _install_state(tmp_path, mqtt)
+
+    try:
+        # Simulate a legacy database row that predates store-level validation.
+        with app.filaments._lock:
+            with app.filaments._connect() as conn:
+                cur = conn.execute(
+                    "INSERT INTO filaments (name, nozzle_temp_other_layer) VALUES (?, ?)",
+                    ("Absurd", 999999),
+                )
+                profile_id = cur.lastrowid
+        preheat = client.post(
+            "/api/filaments/service/preheat",
+            json={"profile_id": profile_id},
+            headers={"X-Api-Key": API_KEY},
+        )
+    finally:
+        _restore_state(old_values, old_svc, old_filaments, old_swap)
+
+    assert preheat.status_code == 200
+    assert preheat.get_json()["target_temp_c"] == 260
+    assert sent == ["M104 S260"]
+
+
+def test_filament_service_temp_clamps_to_printer_hotend_ceiling(tmp_path):
+    mqtt = SimpleNamespace(is_printing=False, send_gcode=lambda gcode: None, nozzle_temp=220)
+    old_values, old_svc, old_filaments, old_swap = _install_state(tmp_path, mqtt)
+
+    try:
+        profile = {"nozzle_temp_other_layer": 290}
+        standard = web_module._filament_service_temp(profile, printer_index=0)
+        app.config["config"].cfg.filament_service["per_printer"]["SN1"] = {"all_metal_hotend": True}
+        all_metal = web_module._filament_service_temp(profile, printer_index=0)
+    finally:
+        _restore_state(old_values, old_svc, old_filaments, old_swap)
+
+    assert standard == 260
+    assert all_metal == 290
+
+
+def test_filaments_apply_route_uses_per_printer_nozzle_ceiling(tmp_path):
+    sent = []
+    mqtt = SimpleNamespace(is_printing=False, send_gcode=lambda gcode: sent.append(gcode), nozzle_temp=25)
+    client = app.test_client()
+    old_values, old_svc, old_filaments, old_swap = _install_state(tmp_path, mqtt)
+
+    try:
+        # Simulate a legacy database row that predates store-level validation.
+        with app.filaments._lock:
+            with app.filaments._connect() as conn:
+                cur = conn.execute(
+                    "INSERT INTO filaments (name, nozzle_temp_first_layer, bed_temp_first_layer) VALUES (?, ?, ?)",
+                    ("High Temp", 290, 130),
+                )
+                profile_id = cur.lastrowid
+        standard = client.post(
+            f"/api/filaments/{profile_id}/apply",
+            headers={"X-Api-Key": API_KEY},
+        )
+        app.config["config"].cfg.filament_service["per_printer"]["SN1"] = {"all_metal_hotend": True}
+        all_metal = client.post(
+            f"/api/filaments/{profile_id}/apply",
+            headers={"X-Api-Key": API_KEY},
+        )
+    finally:
+        _restore_state(old_values, old_svc, old_filaments, old_swap)
+
+    assert standard.status_code == 200
+    assert standard.get_json()["gcode"] == "M104 S260\nM140 S100"
+    assert all_metal.status_code == 200
+    assert all_metal.get_json()["gcode"] == "M104 S290\nM140 S100"
+    assert sent == ["M104 S260\nM140 S100", "M104 S290\nM140 S100"]
+
+
+def test_filament_swap_start_rejected_while_previous_thread_still_running(tmp_path, monkeypatch):
+    sent = []
+    mqtt = SimpleNamespace(is_printing=False, nozzle_temp=25, send_gcode=lambda gcode: sent.append(gcode))
+    client = app.test_client()
+    old_values, old_svc, old_filaments, old_swap = _install_state(tmp_path, mqtt)
+    app.config["config"].cfg.filament_service["allow_legacy_swap"] = True
+    release = threading.Event()
+
+    def fake_unload_worker(token):
+        release.wait(timeout=10)
+
+    monkeypatch.setattr(web_module, "_run_legacy_swap_unload", fake_unload_worker)
+    monkeypatch.setattr(web_module, "FILAMENT_SWAP_CANCEL_JOIN_TIMEOUT_S", 0.05)
+
+    try:
+        unload = app.filaments.create({"name": "PLA Stale", "nozzle_temp_other_layer": 220})
+        load = app.filaments.create({"name": "PETG Stale", "nozzle_temp_other_layer": 240})
+        body = {"unload_profile_id": unload["id"], "load_profile_id": load["id"]}
+        started = client.post(
+            "/api/filaments/service/swap/start",
+            json=body,
+            headers={"X-Api-Key": API_KEY},
+        )
+        old_thread = app.filament_swap_threads.get(0)
+        cancelled = client.post(
+            "/api/filaments/service/swap/cancel",
+            headers={"X-Api-Key": API_KEY},
+        )
+        rejected = client.post(
+            "/api/filaments/service/swap/start",
+            json=body,
+            headers={"X-Api-Key": API_KEY},
+        )
+        release.set()
+        old_thread.join(timeout=5)
+        allowed = client.post(
+            "/api/filaments/service/swap/start",
+            json=body,
+            headers={"X-Api-Key": API_KEY},
+        )
+    finally:
+        _restore_state(old_values, old_svc, old_filaments, old_swap)
+
+    assert started.status_code == 200
+    assert old_thread is not None
+    assert cancelled.status_code == 200
+    assert rejected.status_code == 409
+    assert rejected.get_json()["error"] == "A filament swap is already in progress"
+    assert allowed.status_code == 200
+
+
+def test_legacy_swap_worker_unexpected_error_sets_error_phase_and_cools_nozzle(tmp_path, monkeypatch):
+    sent = []
+    mqtt = SimpleNamespace(
+        is_printing=False,
+        nozzle_temp=25,
+        send_gcode=lambda gcode: sent.append(gcode),
+        send_home=lambda axis: None,
+    )
+    client = app.test_client()
+    old_values, old_svc, old_filaments, old_swap = _install_state(tmp_path, mqtt)
+    app.config["config"].cfg.filament_service["allow_legacy_swap"] = True
+    background_calls = []
+
+    def fake_start_background(target, token, printer_index):
+        background_calls.append((target, token))
+        return SimpleNamespace()
+
+    monkeypatch.setattr(web_module, "_filament_swap_start_background", fake_start_background)
+
+    try:
+        unload = app.filaments.create({"name": "PLA Crash", "nozzle_temp_other_layer": 220})
+        load = app.filaments.create({"name": "PETG Crash", "nozzle_temp_other_layer": 240})
+        started = client.post(
+            "/api/filaments/service/swap/start",
+            json={"unload_profile_id": unload["id"], "load_profile_id": load["id"]},
+            headers={"X-Api-Key": API_KEY},
+        )
+        target, token = background_calls.pop()
+
+        def boom(mqtt):
+            # TypeError: unexpected type not handled by the specific except
+            # clauses and not swallowed by borrow_mqtt's candidate loop.
+            raise TypeError("mqtt object is malformed")
+
+        monkeypatch.setattr(web_module, "_assert_filament_service_ready", boom)
+        target(token)
+        state = client.get(
+            "/api/filaments/service/swap",
+            headers={"X-Api-Key": API_KEY},
+        )
+    finally:
+        _restore_state(old_values, old_svc, old_filaments, old_swap)
+
+    assert started.status_code == 200
+    swap = state.get_json()["swap"]
+    assert swap["phase"] == "error"
+    assert "mqtt object is malformed" in swap["error"]
+    assert "M104 S0" in sent

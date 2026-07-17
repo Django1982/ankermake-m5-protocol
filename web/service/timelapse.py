@@ -61,6 +61,9 @@ class TimelapseService:
             os.makedirs(self._captures_dir, exist_ok=True)
 
         self._lock = threading.Lock()
+        # Serializes prune passes across concurrent finalize threads —
+        # separate from self._lock so pruning never blocks capture start/stop.
+        self._prune_lock = threading.Lock()
         self._capture_thread = None
         self._stop_event = threading.Event()
         self._current_dir = None
@@ -540,6 +543,9 @@ class TimelapseService:
             log.warning("Timelapse: ffmpeg not available, skipping")
             return
 
+        stale_dir = None
+        stale_filename = None
+        stale_frame_count = 0
         with self._lock:
             self._capture_camera = self._resolve_capture_camera()
             if not self._capture_camera.get("effective_source"):
@@ -610,6 +616,16 @@ class TimelapseService:
             else:
                 # New capture or different file — discard any pending resume
                 self._cancel_pending_resume()
+                if self._current_dir is not None:
+                    # A previous capture was never finalized (e.g. the finish/
+                    # abort event was missed across an MQTT reconnect) —
+                    # recover its frames instead of orphaning the directory.
+                    if self._frame_count > 0:
+                        stale_dir = self._current_dir
+                        stale_filename = self._current_filename
+                        stale_frame_count = self._frame_count
+                    else:
+                        self._cleanup_dir(self._current_dir)
                 self._prepare_capture_services()
                 self._current_filename = filename
                 ts = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -635,6 +651,14 @@ class TimelapseService:
                 f"Timelapse: started capture for '{filename}' "
                 f"(interval={self._interval}s, source={camera_source})"
             )
+
+        # Assemble outside the lock — ffmpeg can take up to 120 s
+        if stale_dir:
+            log.warning(
+                f"Timelapse: previous capture for '{stale_filename}' was never "
+                f"finalized ({stale_frame_count} frames), recovering it"
+            )
+            self._finalize_now(stale_dir, stale_filename, stale_frame_count, suffix="_recovered")
 
     def finish_capture(self, final=False):
         """Stop capture and assemble video.
@@ -736,6 +760,21 @@ class TimelapseService:
                 suffix="_partial",
             )
 
+    def handle_mqtt_service_stopped(self):
+        """Restore light/video state when the MQTT service stops mid-capture.
+
+        Only acts when a capture is genuinely active — calling
+        _disable_video_for_timelapse() unconditionally would force the light
+        off even when timelapse never touched it (its _light_was_on default
+        of None restores to False).
+        """
+        if not self._enabled:
+            return
+        with self._lock:
+            if self._current_dir is None:
+                return
+            self._disable_video_for_timelapse()
+
     def _stop_capture_thread(self):
         if self._capture_thread and self._capture_thread.is_alive():
             self._stop_event.set()
@@ -783,6 +822,8 @@ class TimelapseService:
             host = "127.0.0.1"
         port = os.getenv("FLASK_PORT") or "4470"
         api_key = app.config.get("api_key")
+        # Pass the key via HTTP header so it never lands in ffmpeg's argv/URL
+        extra_headers = f"X-Api-Key: {api_key}\r\n" if api_key else None
 
         # Per-snapshot light control: turn on, wait for camera to adjust, then shoot
         vq = (
@@ -813,6 +854,7 @@ class TimelapseService:
                 api_key=api_key,
                 timeout=_SNAPSHOT_TIMEOUT,
                 for_timelapse=(effective_source == web.camera.CAMERA_SOURCE_PRINTER),
+                extra_headers=extra_headers,
             )
             self._set_recovery_state(False)
             self._frame_count += 1
@@ -1067,26 +1109,27 @@ class TimelapseService:
         """Remove oldest archived snapshot collections if over max count."""
         if self._max_videos <= 0:
             return
-        try:
-            base = self._snapshot_archive_base()
-            collections = sorted(
-                (
-                    os.path.join(base, name)
-                    for name in os.listdir(base)
-                    if os.path.isdir(os.path.join(base, name))
-                    and self._media_name_belongs_to_this_printer(
-                        name,
-                        self._read_meta(os.path.join(base, name)),
-                    )
-                ),
-                key=os.path.getmtime,
-            )
-            while len(collections) > self._max_videos:
-                oldest = collections.pop(0)
-                shutil.rmtree(oldest, ignore_errors=True)
-                log.info(f"Timelapse: pruned old snapshot collection {os.path.basename(oldest)}")
-        except OSError as err:
-            log.warning(f"Timelapse: snapshot prune failed: {err}")
+        with self._prune_lock:
+            try:
+                base = self._snapshot_archive_base()
+                collections = sorted(
+                    (
+                        os.path.join(base, name)
+                        for name in os.listdir(base)
+                        if os.path.isdir(os.path.join(base, name))
+                        and self._media_name_belongs_to_this_printer(
+                            name,
+                            self._read_meta(os.path.join(base, name)),
+                        )
+                    ),
+                    key=os.path.getmtime,
+                )
+                while len(collections) > self._max_videos:
+                    oldest = collections.pop(0)
+                    shutil.rmtree(oldest, ignore_errors=True)
+                    log.info(f"Timelapse: pruned old snapshot collection {os.path.basename(oldest)}")
+            except OSError as err:
+                log.warning(f"Timelapse: snapshot prune failed: {err}")
 
     def save_manual_snapshot(self, source_path, *, camera_settings=None, taken_at=None):
         """Persist a manually captured snapshot so it appears in the Snapshots tab."""
@@ -1294,28 +1337,29 @@ class TimelapseService:
         """Remove oldest videos if over max count."""
         if self._max_videos <= 0:
             return
-        try:
-            videos = sorted(
-                [
-                    f for f in os.listdir(self._captures_dir)
-                    if f.endswith(".mp4")
-                    and self._media_name_belongs_to_this_printer(f)
-                ],
-                key=lambda f: os.path.getmtime(os.path.join(self._captures_dir, f)),
-            )
-            while len(videos) > self._max_videos:
-                oldest = videos.pop(0)
-                os.remove(os.path.join(self._captures_dir, oldest))
-                removed_collections = self._delete_snapshot_collections_for_video(oldest)
-                if removed_collections:
-                    log.info(
-                        f"Timelapse: pruned old video {oldest} and snapshot collection(s) "
-                        f"{', '.join(removed_collections)}"
-                    )
-                else:
-                    log.info(f"Timelapse: pruned old video {oldest}")
-        except OSError as err:
-            log.warning(f"Timelapse: prune failed: {err}")
+        with self._prune_lock:
+            try:
+                videos = sorted(
+                    [
+                        f for f in os.listdir(self._captures_dir)
+                        if f.endswith(".mp4")
+                        and self._media_name_belongs_to_this_printer(f)
+                    ],
+                    key=lambda f: os.path.getmtime(os.path.join(self._captures_dir, f)),
+                )
+                while len(videos) > self._max_videos:
+                    oldest = videos.pop(0)
+                    os.remove(os.path.join(self._captures_dir, oldest))
+                    removed_collections = self._delete_snapshot_collections_for_video(oldest)
+                    if removed_collections:
+                        log.info(
+                            f"Timelapse: pruned old video {oldest} and snapshot collection(s) "
+                            f"{', '.join(removed_collections)}"
+                        )
+                    else:
+                        log.info(f"Timelapse: pruned old video {oldest}")
+            except OSError as err:
+                log.warning(f"Timelapse: prune failed: {err}")
 
     def list_videos(self):
         """Return list of available timelapse videos with metadata."""

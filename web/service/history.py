@@ -225,11 +225,13 @@ class PrintHistory:
             with self._connect() as conn:
                 if self._retention_days > 0:
                     cutoff = (datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(days=self._retention_days)).isoformat()
-                    conn.execute("DELETE FROM print_history WHERE started_at < ?", (cutoff,))
+                    # status filter: the shared DB means another printer's long-running
+                    # print may exceed retention age while still active — never prune it.
+                    conn.execute("DELETE FROM print_history WHERE started_at < ? AND status != 'started'", (cutoff,))
 
                 if self._max_entries > 0:
                     conn.execute("""
-                        DELETE FROM print_history WHERE id NOT IN (
+                        DELETE FROM print_history WHERE status != 'started' AND id NOT IN (
                             SELECT id FROM print_history ORDER BY id DESC LIMIT ?
                         )
                     """, (self._max_entries,))
@@ -777,33 +779,55 @@ class PrintHistory:
                     log.info("History: deleted %d selected entr%s", deleted, "y" if deleted == 1 else "ies")
                 return deleted
 
+    def _has_active_entry_locked(self, conn, printer_index=None):
+        sql = "SELECT 1 FROM print_history WHERE status='started'"
+        params = ()
+        if printer_index is not None:
+            sql += " AND printer_index=?"
+            params = (int(printer_index),)
+        return conn.execute(sql + " LIMIT 1", params).fetchone() is not None
+
+    def has_active_entry(self, printer_index=None):
+        """Return True if an in-progress (status='started') entry exists.
+
+        When printer_index is provided, only that printer's rows are checked.
+        """
+        with self._lock:
+            with self._connect() as conn:
+                return self._has_active_entry_locked(conn, printer_index)
+
     def clear(self, printer_index=None):
         """Delete history entries.
 
         When printer_index is provided, only rows for that printer are removed.
-        Legacy rows with NULL printer_index are preserved.
+        Legacy rows with NULL printer_index are preserved. In-progress entries
+        (status='started') and their archived files are never deleted.
         """
         with self._lock:
             with self._connect() as conn:
-                if printer_index is None:
+                delete_archive_dir = False
+                # Fast path: nothing is printing anywhere, so wipe table + archive dir.
+                if printer_index is None and not self._has_active_entry_locked(conn):
                     conn.execute("DELETE FROM print_history")
                     log.info("Print history cleared")
                     delete_archive_dir = True
                 else:
-                    scoped_index = int(printer_index)
+                    if printer_index is None:
+                        where = "status != 'started'"
+                        params = ()
+                    else:
+                        where = "printer_index=? AND status != 'started'"
+                        params = (int(printer_index),)
                     archive_relpaths = [
                         row[0]
                         for row in conn.execute(
                             "SELECT DISTINCT archive_relpath FROM print_history "
-                            "WHERE printer_index=? AND archive_relpath IS NOT NULL AND archive_relpath != ''",
-                            (scoped_index,),
+                            f"WHERE {where} AND archive_relpath IS NOT NULL AND archive_relpath != ''",
+                            params,
                         ).fetchall()
                         if row[0]
                     ]
-                    conn.execute(
-                        "DELETE FROM print_history WHERE printer_index=?",
-                        (scoped_index,),
-                    )
+                    conn.execute(f"DELETE FROM print_history WHERE {where}", params)
                     if archive_relpaths:
                         still_referenced = {
                             row[0]
@@ -818,7 +842,9 @@ class PrintHistory:
                             [relpath for relpath in archive_relpaths if relpath not in still_referenced]
                         )
                     self._delete_unreferenced_archives(conn)
-                    log.info("Print history cleared for printer %d", scoped_index)
-                    delete_archive_dir = False
+                    if printer_index is None:
+                        log.info("Print history cleared (in-progress entries preserved)")
+                    else:
+                        log.info("Print history cleared for printer %d", int(printer_index))
         if delete_archive_dir and self._archive_dir and os.path.isdir(self._archive_dir):
             shutil.rmtree(self._archive_dir, ignore_errors=True)

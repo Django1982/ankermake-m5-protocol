@@ -153,9 +153,47 @@ class TestSQLInjectionProtection:
 class TestPathTraversalProtection:
     """Test path traversal attack prevention"""
 
-    def test_log_viewer_path_traversal_blocked(self):
-        """GET /api/debug/logs/../../../etc/passwd is blocked"""
-        _pending_security_coverage("debug log file path traversal")
+    def test_log_viewer_path_traversal_blocked(self, monkeypatch, tmp_path):
+        """GET /api/debug/logs/<filename> rejects path traversal attempts"""
+        import importlib
+        import web as web_module
+
+        # reload() replaces the module-global `app`; view functions of app
+        # instances bound by other test modules resolve `app` through the
+        # module dict, so the original instance must be restored afterwards.
+        original_app = web_module.app
+        monkeypatch.setenv("ANKERCTL_DEV_MODE", "true")
+        importlib.reload(web_module)
+
+        try:
+            flask_app = web_module.app
+            client = flask_app.test_client()
+            flask_app.config["api_key"] = API_KEY
+            flask_app.config["login"] = True
+            flask_app.config["config"] = FakeConfigManager(_base_config())
+            flask_app.config["printer_index"] = 0
+            monkeypatch.setattr(web_module, "_log_dir", str(tmp_path))
+            (tmp_path / "web.log").write_text("hello\n")
+
+            dotdot = client.get(
+                "/api/debug/logs/..web.log", headers=_auth_headers()
+            )
+            encoded = client.get(
+                "/api/debug/logs/..%2F..%2Fetc%2Fpasswd", headers=_auth_headers()
+            )
+            legit = client.get("/api/debug/logs/web.log", headers=_auth_headers())
+        finally:
+            monkeypatch.setenv("ANKERCTL_DEV_MODE", "false")
+            importlib.reload(web_module)
+            web_module.app = original_app
+
+        assert dotdot.status_code == 400
+        assert dotdot.get_json()["error"] == "Invalid filename"
+        # encoded slashes must never reach the file system: either the guard
+        # rejects the decoded filename (400) or routing refuses the path (404)
+        assert encoded.status_code != 200
+        assert legit.status_code == 200
+        assert legit.get_json()["content"] == "hello\n"
 
     def test_timelapse_filename_path_traversal(self):
         """Timelapse download with ../ in filename is blocked"""
@@ -410,6 +448,61 @@ class TestSecurityIntegration:
 
         assert responses
         assert all(status == 401 for _, status in responses), responses
+
+    def test_setup_endpoints_require_auth_when_api_key_already_configured(self, tmp_path):
+        """A pre-configured API key (e.g. ANKERCTL_API_KEY set before first
+        boot, as in a Docker deployment) must be honored even during the
+        setup window, i.e. before any printer/account is configured.
+
+        There used to be a blanket setup-path exemption keyed only on
+        "no printer configured yet" that ignored whether an API key had
+        already been set, letting anyone on the LAN complete first-run setup
+        (and thus take over the instance) during that window. That exemption
+        has been removed — this test guards against it coming back."""
+        client = app.test_client()
+        old_values, old_svc, old_filaments = _install_security_state(tmp_path)
+        app.config["login"] = None  # no printer/account configured yet
+        try:
+            responses = [
+                ("/api/ankerctl/config/upload", client.post("/api/ankerctl/config/upload").status_code),
+                (
+                    "/api/ankerctl/config/login",
+                    client.post(
+                        "/api/ankerctl/config/login",
+                        data={"login_email": "a@b.com", "login_password": "pw", "login_country": "us"},
+                    ).status_code,
+                ),
+                ("/api/ankerctl/config/import-slicer", client.post("/api/ankerctl/config/import-slicer").status_code),
+            ]
+        finally:
+            _restore_security_state(old_values, old_svc, old_filaments)
+
+        assert all(status == 401 for _, status in responses), responses
+
+    def test_every_entry_in_protected_get_paths_actually_requires_auth(self, tmp_path):
+        """Every path listed in the real _PROTECTED_GET_PATHS set must 401
+        without auth.
+
+        Unlike test_anonymous_user_cannot_access_protected_endpoints (which
+        checks a hand-picked sample), this iterates the actual set used by
+        _check_api_key() so a future edit that drops or typos an entry is
+        caught immediately instead of silently reopening a previously
+        protected endpoint. before_request auth checks run ahead of route
+        matching, so this holds even for dev-mode-only paths like
+        /api/debug/state when ANKERCTL_DEV_MODE is off."""
+        from web import _PROTECTED_GET_PATHS
+
+        assert _PROTECTED_GET_PATHS, "protected GET path set must not be empty"
+
+        client = app.test_client()
+        old_values, old_svc, old_filaments = _install_security_state(tmp_path)
+        try:
+            responses = [(path, client.get(path).status_code) for path in sorted(_PROTECTED_GET_PATHS)]
+        finally:
+            _restore_security_state(old_values, old_svc, old_filaments)
+
+        failures = [(path, status) for path, status in responses if status != 401]
+        assert not failures, f"protected GET paths did not require auth: {failures}"
 
     def test_authenticated_user_can_access_allowed_endpoints(self, tmp_path):
         """Authenticated user can access non-restricted endpoints"""

@@ -282,6 +282,26 @@
                                     </div>
                                 </div>
                             </div>
+                            <div class="col-lg-6">
+                                <div class="card h-100">
+                                    <div class="card-header fs-4">
+                                        Hotend
+                                    </div>
+                                    <div class="card-body">
+                                        <div class="form-check">
+                                            <input class="form-check-input" type="checkbox" id="printer-all-metal-hotend">
+                                            <label class="form-check-label" for="printer-all-metal-hotend">
+                                                All-Metal Hotend (raises nozzle limit to 300°C)
+                                            </label>
+                                        </div>
+                                        <div class="form-text">Per-printer setting. Stock hotend limit is 260°C.</div>
+                                        <button type="button" class="btn btn-outline-secondary btn-sm mt-3" id="printer-save-hotend-btn">
+                                            {{ macro.bi_icon("save") }} Save
+                                        </button>
+                                        <div id="printer-hotend-status" class="text-muted small mt-2"></div>
+                                    </div>
+                                </div>
+                            </div>
                             <div class="col-12">
                                 <div class="card">
                                     <div class="card-header fs-4 d-flex justify-content-between align-items-center">
@@ -556,7 +576,7 @@
                                             <div class="col-lg-4">
                                                 <label class="form-label" for="z-offset-target">Absolute target (mm)</label>
                                                 <div class="input-group">
-                                                    <input id="z-offset-target" type="number" class="form-control" step="0.01" inputmode="decimal" placeholder="0.00">
+                                                    <input id="z-offset-target" type="number" class="form-control" step="0.01" min="-2.00" max="2.00" inputmode="decimal" placeholder="0.00">
                                                     <button id="z-offset-set-btn" type="button" class="btn btn-primary">
                                                         <i class="bi bi-check2"></i> Set
                                                     </button>

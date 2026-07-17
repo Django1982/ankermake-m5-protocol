@@ -642,6 +642,7 @@ def test_timelapse_take_snapshot_retries_and_restores_light(monkeypatch, tmp_pat
     assert len(captures) == 1
     assert captures[0]["ffmpeg_path"] == "resolved-ffmpeg"
     assert captures[0]["api_key"] == "secret-key"
+    assert captures[0]["extra_headers"] == "X-Api-Key: secret-key\r\n"
     assert captures[0]["for_timelapse"] is True
     assert captures[0]["camera_settings"]["effective_source"] == "printer"
     assert light_calls == [True, False]
@@ -1033,3 +1034,139 @@ def test_timelapse_runtime_state_reports_recovery(tmp_path):
     cleared = svc.get_runtime_state()
     assert cleared["recovering"] is False
     assert cleared["detail"] is None
+
+
+def test_start_capture_finalizes_stale_current_dir_for_different_filename(monkeypatch, tmp_path):
+    """A capture left open for job_a (finish/fail never called, simulating a
+    missed MQTT event across a reconnect) must be archived, not silently
+    overwritten, when start_capture() is called for a genuinely new job_b."""
+    cfg = FakeConfigManager(tmp_path)
+    svc = TimelapseService(cfg, captures_dir=tmp_path)
+    stale_dir = str(tmp_path / _IN_PROGRESS_SUBDIR / "stale_job_a")
+    os.makedirs(stale_dir, exist_ok=True)
+    svc._current_dir = stale_dir
+    svc._current_filename = "job_a.gcode"
+    svc._frame_count = 1
+
+    class FakeThread:
+        def __init__(self, target=None, daemon=None, name=None):
+            pass
+
+        def start(self):
+            pass
+
+    finalized = []
+    monkeypatch.setattr("web.service.timelapse._resolve_ffmpeg_path", lambda: "/usr/bin/ffmpeg")
+    monkeypatch.setattr(
+        TimelapseService,
+        "_resolve_capture_camera",
+        lambda self: {"effective_source": web.camera.CAMERA_SOURCE_PRINTER},
+    )
+    monkeypatch.setattr(TimelapseService, "_enable_video_for_timelapse", lambda self: None)
+    monkeypatch.setattr(TimelapseService, "_stop_capture_thread", lambda self: None)
+    monkeypatch.setattr("web.service.timelapse.threading.Thread", FakeThread)
+    monkeypatch.setattr(
+        svc, "_finalize_now",
+        lambda d, f, c, **kw: finalized.append((d, f, c, kw.get("suffix"))),
+    )
+
+    svc.start_capture("job_b.gcode")
+
+    assert finalized == [(stale_dir, "job_a.gcode", 1, "_recovered")]
+    assert svc._current_filename == "job_b.gcode"
+    assert svc._current_dir != stale_dir
+    assert svc._frame_count == 0
+
+
+def test_start_capture_discards_stale_current_dir_without_frames(monkeypatch, tmp_path):
+    cfg = FakeConfigManager(tmp_path)
+    svc = TimelapseService(cfg, captures_dir=tmp_path)
+    stale_dir = str(tmp_path / _IN_PROGRESS_SUBDIR / "stale_empty")
+    os.makedirs(stale_dir, exist_ok=True)
+    svc._current_dir = stale_dir
+    svc._current_filename = "job_a.gcode"
+    svc._frame_count = 0
+
+    class FakeThread:
+        def __init__(self, target=None, daemon=None, name=None):
+            pass
+
+        def start(self):
+            pass
+
+    finalized = []
+    monkeypatch.setattr("web.service.timelapse._resolve_ffmpeg_path", lambda: "/usr/bin/ffmpeg")
+    monkeypatch.setattr(
+        TimelapseService,
+        "_resolve_capture_camera",
+        lambda self: {"effective_source": web.camera.CAMERA_SOURCE_PRINTER},
+    )
+    monkeypatch.setattr(TimelapseService, "_enable_video_for_timelapse", lambda self: None)
+    monkeypatch.setattr(TimelapseService, "_stop_capture_thread", lambda self: None)
+    monkeypatch.setattr("web.service.timelapse.threading.Thread", FakeThread)
+    monkeypatch.setattr(
+        svc, "_finalize_now",
+        lambda d, f, c, **kw: finalized.append((d, f, c, kw.get("suffix"))),
+    )
+
+    svc.start_capture("job_b.gcode")
+
+    assert finalized == []
+    assert not os.path.isdir(stale_dir)
+    assert svc._current_filename == "job_b.gcode"
+
+
+def test_handle_mqtt_service_stopped_restores_light_when_capture_active(monkeypatch, tmp_path):
+    cfg = FakeConfigManager(tmp_path)
+    svc = TimelapseService(cfg, captures_dir=tmp_path)
+    svc._current_dir = str(tmp_path / _IN_PROGRESS_SUBDIR / "active")
+    svc._current_filename = "cube.gcode"
+    svc._frame_count = 3
+    svc._light_mode = "session"
+    svc._light_was_on = False
+
+    light_calls = []
+    monkeypatch.setattr(web, "get_video_service", lambda idx: None)
+    monkeypatch.setattr(web, "set_printer_light_state", lambda state, idx: light_calls.append((state, idx)))
+
+    svc.handle_mqtt_service_stopped()
+
+    assert light_calls == [(False, 0)]
+    assert svc._light_was_on is None
+
+
+def test_handle_mqtt_service_stopped_noop_without_active_capture(monkeypatch, tmp_path):
+    """Regression guard: with no capture active, the light must NOT be touched —
+    _disable_video_for_timelapse() would force it off (default restore=False)."""
+    cfg = FakeConfigManager(tmp_path)
+    svc = TimelapseService(cfg, captures_dir=tmp_path)
+    assert svc._current_dir is None
+    svc._light_mode = "session"
+
+    light_calls = []
+    monkeypatch.setattr(web, "get_video_service", lambda idx: None)
+    monkeypatch.setattr(web, "set_printer_light_state", lambda state, idx: light_calls.append((state, idx)))
+
+    svc.handle_mqtt_service_stopped()
+
+    assert light_calls == []
+
+
+def test_prune_passes_hold_dedicated_prune_lock(monkeypatch, tmp_path):
+    cfg = FakeConfigManager(tmp_path)
+    svc = TimelapseService(cfg, captures_dir=tmp_path)
+
+    locked_during = []
+    real_listdir = os.listdir
+
+    def spy_listdir(path):
+        locked_during.append(svc._prune_lock.locked())
+        return real_listdir(path)
+
+    monkeypatch.setattr("web.service.timelapse.os.listdir", spy_listdir)
+
+    svc._prune_old_videos()
+    svc._prune_old_snapshot_collections()
+
+    assert locked_during
+    assert all(locked_during)

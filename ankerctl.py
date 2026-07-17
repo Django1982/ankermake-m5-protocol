@@ -202,7 +202,7 @@ def mqtt_send(env, command_type, args, force):
             log.fatal("Refusing to perform factory reset (override with --force)")
             raise SystemExit(1)
 
-        if command_type == MqttMsgType.ZZ_MQTT_CMD_DEVICE_NAME_SET and "devName" not in cmd:
+        if command_type == MqttMsgType.ZZ_MQTT_CMD_DEVICE_NAME_SET and not cmd.get("devName"):
             log.fatal("Sending DEVICE_NAME_SET without devName=<name> will crash printer (override with --force)")
             raise SystemExit(1)
 
@@ -283,6 +283,10 @@ def mqtt_rename_printer(env, newname):
     """
     Set a new nickname for your printer
     """
+
+    if not newname.strip():
+        log.fatal("Printer name cannot be empty")
+        raise SystemExit(1)
 
     client = cli.mqtt.mqtt_open(env.config, env.printer_index, env.insecure, env.mqtt_ca_cert)
 
@@ -417,7 +421,6 @@ def pppp_print_file(env, file, no_act, upload_rate_mbps):
     file, so anytime a file is uploaded, the old one is deleted.
     """
     env.load_config()
-    api = cli.pppp.pppp_open(env.config, env.printer_index, dumpfile=env.pppp_dump)
 
     user_id = "-"
     with env.config.open() as cfg:
@@ -430,6 +433,7 @@ def pppp_print_file(env, file, no_act, upload_rate_mbps):
     fui = FileUploadInfo.from_data(data, file.name, user_name="ankerctl", user_id=user_id, machine_id=file_uuid)
     log.info(f"Going to upload {fui.size} bytes as {fui.name!r}")
     log.info(f"Using upload rate limit: {rate_limit_mbps} Mbps")
+    api = cli.pppp.pppp_open(env.config, env.printer_index, dumpfile=env.pppp_dump)
     try:
         cli.pppp.pppp_send_file(api, fui, data, rate_limit_mbps=rate_limit_mbps)
         if no_act:
@@ -461,11 +465,11 @@ def pppp_capture_video(env, file, max_size):
     env.load_config()
     api = cli.pppp.pppp_open(env.config, env.printer_index, dumpfile=env.pppp_dump)
 
-    cmd = {"commandType": P2PSubCmdType.START_LIVE, "data": {"encryptkey": "x", "accountId": "y"}}
-    api.send_xzyh(json.dumps(cmd).encode(), cmd=P2PCmdType.P2P_JSON_CMD)
+    size = 0
     try:
+        cmd = {"commandType": P2PSubCmdType.START_LIVE, "data": {"encryptkey": "x", "accountId": "y"}}
+        api.send_xzyh(json.dumps(cmd).encode(), cmd=P2PCmdType.P2P_JSON_CMD, timeout=5.0)
         with tqdm(unit="b", total=max_size, unit_scale=True, unit_divisor=1024) as bar:
-            size = 0
             while True:
                 d = api.recv_xzyh(chan=1)
                 size += len(d.data)
@@ -475,8 +479,11 @@ def pppp_capture_video(env, file, max_size):
                 if size >= max_size:
                     break
     finally:
-        cmd = {"commandType": P2PSubCmdType.CLOSE_LIVE}
-        api.send_xzyh(json.dumps(cmd).encode(), cmd=P2PCmdType.P2P_JSON_CMD)
+        try:
+            cmd = {"commandType": P2PSubCmdType.CLOSE_LIVE}
+            api.send_xzyh(json.dumps(cmd).encode(), cmd=P2PCmdType.P2P_JSON_CMD, timeout=5.0)
+        finally:
+            api.stop()
 
     log.info(f"Successfully captured {cli.util.pretty_size(size)} video stream into {file.name}")
 
@@ -577,8 +584,9 @@ def config(ctx):
 
 @config.command("decode")
 @click.argument("fd", required=False, type=click.File("rb"), metavar="path/to/login.json")
+@click.option("--show-secrets", is_flag=True, help="Print full auth_token/user_id instead of redacting them")
 @pass_env
-def config_decode(env, fd):
+def config_decode(env, fd, show_secrets):
     """
     Decode a `login.json` file and print its contents.
     """
@@ -589,6 +597,12 @@ def config_decode(env, fd):
     log.info("Loading file..")
 
     cache = libflagship.logincache.load(fd.read())["data"]
+    if not show_secrets:
+        cache = dict(cache)
+        for key in ("auth_token", "user_id"):
+            value = cache.get(key)
+            if value:
+                cache[key] = f"{value[:10]}...<REDACTED>"
     print(json.dumps(cache, indent=4))
 
 
@@ -643,6 +657,12 @@ def config_login(env, country, email, password):
 
     if password is None:
         password = getpass.getpass("Please enter your password: ")
+    else:
+        log.warning(
+            "Passing the password as a command-line argument exposes it in your "
+            "shell history and to other local users via 'ps'. Omit it to be "
+            "prompted securely instead."
+        )
 
     if country:
         country = country.upper()

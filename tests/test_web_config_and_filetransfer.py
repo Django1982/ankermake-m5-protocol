@@ -65,6 +65,15 @@ def test_config_import_handles_invalid_login_and_api_errors(monkeypatch):
         config_import(valid_login, object())
 
 
+def test_config_import_rejects_oversized_login_file():
+    from web.config import MAX_LOGIN_FILE_BYTES
+
+    oversized = SimpleNamespace(stream=io.BytesIO(b"a" * (MAX_LOGIN_FILE_BYTES + 1)))
+
+    with pytest.raises(ConfigImportError, match="too large"):
+        config_import(oversized, object())
+
+
 def test_config_login_handles_captcha_and_success(monkeypatch):
     imported = []
     fetch_calls = []

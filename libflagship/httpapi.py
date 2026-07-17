@@ -33,6 +33,22 @@ def require_auth_token(func):
     return wrapper
 
 
+_SENSITIVE_JSON_KEYS = {
+    "auth_token", "token", "password", "secret_key", "dsk_key", "mqtt_key", "p2p_key",
+}
+
+
+def _redact_sensitive(value):
+    if isinstance(value, dict):
+        return {
+            k: ("[REDACTED]" if k.lower() in _SENSITIVE_JSON_KEYS else _redact_sensitive(v))
+            for k, v in value.items()
+        }
+    if isinstance(value, list):
+        return [_redact_sensitive(item) for item in value]
+    return value
+
+
 def unwrap_api(func):
 
     @functools.wraps(func)
@@ -42,7 +58,8 @@ def unwrap_api(func):
         data = func(self, *args, **kwargs)
         if data.ok:
             jsn = data.json()
-            log.debug(f"JSON result: {json.dumps(jsn, indent=4)}")
+            if log.getLogger().isEnabledFor(log.DEBUG):
+                log.debug(f"JSON result: {json.dumps(_redact_sensitive(jsn), indent=4)}")
             if jsn["code"] == 0:
                 data = jsn.get("data")
                 return data

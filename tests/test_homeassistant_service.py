@@ -102,10 +102,24 @@ def test_homeassistant_publish_discovery_emits_expected_entities():
 
     topics = [topic for topic, *_ in client.published]
     assert "ha/sensor/ankerctl_SN123/print_progress/config" in topics
+    assert "ha/sensor/ankerctl_SN123/fan_speed/config" in topics
     assert "ha/binary_sensor/ankerctl_SN123/mqtt_connected/config" in topics
     assert "ha/switch/ankerctl_SN123/light/config" in topics
     assert "ha/camera/ankerctl_SN123/camera/config" in topics
-    assert len(client.published) == 15
+    assert len(client.published) == 16
+
+
+def test_homeassistant_ha_web_urls_use_resolved_api_key(monkeypatch):
+    svc = HomeAssistantService(
+        FakeConfigManager(_service_config()), printer_sn="SN123", printer_name="Printer", printer_index=0
+    )
+    monkeypatch.delenv("ANKERCTL_API_KEY", raising=False)
+    monkeypatch.setitem(web_module.app.config, "api_key", "resolved-key")
+
+    mjpeg_url, snapshot_url = svc._ha_web_urls()
+
+    assert "apikey=resolved-key" in mjpeg_url
+    assert "apikey=resolved-key" in snapshot_url
 
 
 def test_homeassistant_on_connect_and_light_command(monkeypatch):
@@ -261,6 +275,92 @@ def test_homeassistant_disconnect_and_publish_failures_are_non_fatal():
     svc._on_disconnect(None, None, 1)
 
     assert svc._connected is False
+
+
+def test_homeassistant_reload_config_survives_bad_port_type():
+    svc = HomeAssistantService(FakeConfigManager(_service_config()), printer_sn="SN123", printer_name="Printer")
+    prior_port = svc._port
+
+    bad_config = SimpleNamespace(
+        home_assistant={
+            "enabled": True,
+            "mqtt_host": "mqtt.example",
+            "mqtt_port": "not-a-number",
+            "mqtt_username": "ha-user",
+            "mqtt_password": "ha-pass",
+            "discovery_prefix": "ha",
+        }
+    )
+
+    svc.reload_config(bad_config)
+
+    assert svc._port == prior_port
+
+
+def test_register_mjpeg_camera_idempotency_matches_own_entry(monkeypatch):
+    svc = HomeAssistantService(FakeConfigManager(_service_config()), printer_sn="SN123", printer_name="Printer")
+    svc._ha_base_url = "http://ha.example"
+    svc._ha_token = "token"
+
+    camera_name = f"AnkerMake {svc._printer_sn}"
+    existing_entries = [{"domain": "mjpeg", "title": camera_name, "entry_id": "existing-entry-id"}]
+
+    calls = []
+
+    def fake_request(method, path, body=None, ha_base_url=None, ha_token=None):
+        calls.append((method, path))
+        if method == "GET":
+            return existing_entries
+        raise AssertionError("should not attempt to create a duplicate camera entry")
+
+    monkeypatch.setattr(svc, "_ha_rest_request", fake_request)
+
+    svc._register_ha_mjpeg_camera()
+
+    assert svc._ha_mjpeg_entry_id == "existing-entry-id"
+    assert calls == [("GET", "/api/config/config_entries")]
+
+
+def test_start_and_stop_hold_lock(monkeypatch):
+    """Fix 3: start()/stop() must hold self._lock for their duration so two
+    near-simultaneous reload_config() calls can't race on self._client."""
+    fake_client = FakeMQTTClient()
+    svc_holder = []
+    lock_states_on_connect = []
+
+    class FakePahoModule:
+        class CallbackAPIVersion:
+            VERSION1 = object()
+
+        @staticmethod
+        def Client(*args, **kwargs):
+            lock_states_on_connect.append(svc_holder[0]._lock.locked())
+            return fake_client
+
+    monkeypatch.setattr("web.service.homeassistant.paho_mqtt", FakePahoModule)
+
+    # Construct with enabled=False so __init__ -> reload_config() does not
+    # auto-start before svc_holder is populated for the FakePahoModule closure.
+    svc = HomeAssistantService(
+        FakeConfigManager(_service_config(enabled=False)), printer_sn="SN123", printer_name="Printer"
+    )
+    svc_holder.append(svc)
+    svc._enabled = True
+    svc.start()
+
+    assert lock_states_on_connect == [True]
+
+    lock_states_on_unregister = []
+    orig_unregister = svc._unregister_ha_mjpeg_camera
+
+    def spy_unregister():
+        lock_states_on_unregister.append(svc._lock.locked())
+        return orig_unregister()
+
+    svc._unregister_ha_mjpeg_camera = spy_unregister
+    svc.stop()
+
+    assert lock_states_on_unregister == [True]
 
 
 def test_rapid_reconnect_no_thread_leak():

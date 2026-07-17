@@ -78,6 +78,10 @@ class Service(Thread):
         self._ready_event = Event()
         self._stopped_event = Event()
         self._stopped_event.set()   # starts in stopped state
+        # Serialize overlapping restart() calls: a stale `wanted` snapshot taken
+        # before another thread's stop()/start() sequence can otherwise leave
+        # the service stopped after two concurrent restarts.
+        self._restart_lock = Lock()
         # S-4: snapshot-based handler dispatch to avoid holding lock during callbacks
         self._handlers_lock = Lock()
         self._handlers_snapshot = ()
@@ -113,13 +117,14 @@ class Service(Thread):
         self._event.set()
 
     def restart(self):
-        log.info(f"{self.name}: Requesting restart")
-        wanted = self.wanted
-        self.stop()
-        self.await_stopped()
-        if wanted:
-            self.start()
-            self.await_ready()
+        with self._restart_lock:
+            log.info(f"{self.name}: Requesting restart")
+            wanted = self.wanted
+            self.stop()
+            self.await_stopped()
+            if wanted:
+                self.start()
+                self.await_ready()
 
     def shutdown(self):
         if self.state != RunState.Stopped:
@@ -197,7 +202,7 @@ class Service(Thread):
         except Exception as E:
             if self.wanted:
                 self._log_start_failure(E, retrying=True)
-                self._holdoff.reset(delay=1)
+                self._holdoff.reset(delay=getattr(E, "delay", 1))
             else:
                 self._log_start_failure(E, retrying=False)
                 self.state = RunState.Stopped

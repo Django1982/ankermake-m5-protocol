@@ -74,6 +74,14 @@ $(function () {
         return Number.isFinite(Number(temp)) ? `${Math.round(Number(temp))}°C` : "--";
     }
 
+    function updateFanSpeed(value) {
+        const parsed = Number(value);
+        const available = value !== null && value !== "" && Number.isFinite(parsed);
+        const percent = available ? Math.max(0, Math.min(100, Math.round(parsed))) : 0;
+        $("#fan-speed").text(available ? `${percent} %` : "– %");
+        $("#fan-speed-meter-fill").css("width", `${percent}%`);
+    }
+
     /**
      * Calculate the percentage between two numbers
      * @param {number} layer
@@ -526,6 +534,7 @@ $(function () {
 
     const _filamentStatus = {
         label: "Unknown",
+        materialLabel: null,
         detail: null,
         issue: null,
         pauseReason: null,
@@ -575,12 +584,12 @@ $(function () {
         const value = String(label || "Unknown");
         el.text(value);
         el.removeClass("text-success text-warning text-danger text-muted");
-        if (value === "Loaded") {
-            el.addClass("text-success");
-        } else if (value === "Not Loaded") {
+        if (value === "Not Loaded") {
             el.addClass("text-danger");
         } else if (value === "Changing") {
             el.addClass("text-warning");
+        } else if (/loaded$/i.test(value)) {
+            el.addClass("text-success");
         } else {
             el.addClass("text-muted");
         }
@@ -611,6 +620,11 @@ $(function () {
             label = "Unknown";
             detail = detail || "Filament presence cannot be confirmed until the printer starts printing.";
             detailTone = "muted";
+        }
+        if (label === "Loaded") {
+            label = _filamentStatus.materialLabel
+                ? `${_filamentStatus.materialLabel} - Loaded`
+                : "Unknown Filament loaded";
         }
         if (!detail && pausedForFilament && _filamentStatus.label === "Loaded") {
             detail = "Filament loaded. Resume the print when ready.";
@@ -1039,6 +1053,7 @@ $(function () {
 
         const filament = data.filament || {};
         _filamentStatus.label = String(filament.label || "Unknown");
+        _filamentStatus.materialLabel = filament.material_label || null;
         _filamentStatus.detail = filament.detail || null;
         _filamentStatus.issue = filament.issue || null;
         _filamentStatus.pauseReason = filament.pause_reason_label || null;
@@ -1063,6 +1078,9 @@ $(function () {
                 bedCurrent: temperature.bed,
                 bedTarget: temperature.bed_target,
             });
+        }
+        if (Object.prototype.hasOwnProperty.call(data, "telemetry")) {
+            updateFanSpeed((data.telemetry || {}).fan_speed);
         }
         applyCameraRuntimeState(data.camera || {});
 
@@ -1362,6 +1380,8 @@ $(function () {
     }
 
     const Z_OFFSET_STEP_MM = 0.01;
+    const Z_OFFSET_MIN_MM = -2.0;
+    const Z_OFFSET_MAX_MM = 2.0;
     let _zOffsetCurrentMm = null;
 
     function setZOffsetControlsEnabled(enabled) {
@@ -1376,7 +1396,8 @@ $(function () {
         if (!Number.isFinite(number)) {
             return null;
         }
-        return Math.round(number * 100) / 100;
+        const clamped = Math.min(Z_OFFSET_MAX_MM, Math.max(Z_OFFSET_MIN_MM, number));
+        return Math.round(clamped * 100) / 100;
     }
 
     function extractZOffsetMm(payload) {
@@ -1629,10 +1650,13 @@ $(function () {
                     });
                 }
                 pushTempData("bed", getTemp(data.currentTemp), getTemp(data.targetTemp));
+            } else if (data.commandType == 1005) {
+                // Returns part cooling fan speed as a percentage.
+                updateFanSpeed(data.value);
             } else if (data.commandType == 1006) {
                 // Returns Print Speed
                 const X = getSpeedFactor(data.value);
-                $("#print-speed").text(`${data.value}mm/s ${X}`);
+                $("#print-speed").text(`${data.value} mm/s ${X}`);
             } else if (data.commandType == 1007) {
                 // auto_leveling: value = current probe point (1 center + 7×7 = 50 points total)
                 const point = data.value;
@@ -1718,9 +1742,11 @@ $(function () {
                 bedCurrent: null,
                 bedTarget: null,
             });
-            $("#print-speed").text("0mm/s");
+            $("#print-speed").text("0 mm/s");
+            updateFanSpeed(null);
             $("#print-layer").text("0 / 0");
             _filamentStatus.label = "Unknown";
+            _filamentStatus.materialLabel = null;
             _filamentStatus.detail = null;
             _filamentStatus.issue = null;
             _filamentStatus.pauseReason = null;
@@ -2863,9 +2889,11 @@ $(function () {
     // ------------------------------------------------------------------
 
     /**
-     * localStorage key and cap for bed level snapshots.
+     * localStorage key (scoped per printer) and cap for bed level snapshots.
      */
-    const BED_SNAP_KEY = "ankerctl_bed_snapshots";
+    function bedSnapKey() {
+        return `ankerctl_bed_snapshots_p${getActivePrinterIndex()}`;
+    }
     const BED_SNAP_MAX = 10;
 
     /**
@@ -2877,7 +2905,7 @@ $(function () {
     /** Load snapshots array from localStorage. */
     function bedSnapLoad() {
         try {
-            return JSON.parse(localStorage.getItem(BED_SNAP_KEY) || "[]");
+            return JSON.parse(localStorage.getItem(bedSnapKey()) || "[]");
         } catch (_) {
             return [];
         }
@@ -2885,7 +2913,7 @@ $(function () {
 
     /** Persist snapshots array to localStorage. */
     function bedSnapSave(snaps) {
-        localStorage.setItem(BED_SNAP_KEY, JSON.stringify(snaps));
+        localStorage.setItem(bedSnapKey(), JSON.stringify(snaps));
     }
 
     /**
@@ -3600,6 +3628,70 @@ $(function () {
     });
 
     loadCameraSettings();
+
+    /**
+     * Hotend setting (Setup -> Printer): all-metal hotend raises the nozzle limit to 300°C.
+     * Stored per-printer in the filament-service settings, but managed independently here.
+     */
+    function setHotendStatus(message, kind = "muted") {
+        const statusEl = document.getElementById("printer-hotend-status");
+        if (!statusEl) {
+            return;
+        }
+        statusEl.textContent = message;
+        statusEl.className = `text-${kind} small mt-2`;
+    }
+
+    async function loadHotendSettings() {
+        const checkboxEl = document.getElementById("printer-all-metal-hotend");
+        if (!checkboxEl) {
+            return;
+        }
+        try {
+            const resp = await fetch(withActivePrinterQuery("/api/settings/filament-service"));
+            const data = await resp.json().catch(() => ({}));
+            if (!resp.ok) {
+                throw new Error(data.error || `HTTP ${resp.status}`);
+            }
+            checkboxEl.checked = !!(data.filament_service || {}).all_metal_hotend;
+        } catch (err) {
+            setHotendStatus(`Failed to load hotend setting: ${err.message || err}`, "danger");
+        }
+    }
+
+    $("#printer-save-hotend-btn").on("click", async function () {
+        const btn = $(this);
+        const checkboxEl = document.getElementById("printer-all-metal-hotend");
+        btn.prop("disabled", true);
+        try {
+            const resp = await fetch(withActivePrinterQuery("/api/settings/filament-service"), {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({
+                    filament_service: { all_metal_hotend: !!checkboxEl?.checked },
+                }),
+            });
+            const data = await resp.json().catch(() => ({}));
+            if (!resp.ok) {
+                throw new Error(data.error || `HTTP ${resp.status}`);
+            }
+            if (checkboxEl) {
+                checkboxEl.checked = !!(data.filament_service || {}).all_metal_hotend;
+            }
+            setHotendStatus("Hotend setting saved.", "success");
+        } catch (err) {
+            setHotendStatus(`Failed to save hotend setting: ${err.message || err}`, "danger");
+        } finally {
+            btn.prop("disabled", false);
+        }
+    });
+
+    // Reload the per-printer hotend setting when the active printer changes (navbar switch).
+    document.addEventListener("printerChanged", function () {
+        loadHotendSettings();
+    });
+
+    loadHotendSettings();
 
     /**
      * GCode Console
@@ -6465,7 +6557,7 @@ $(function () {
 
     async function filamentLoadSwapSettings() {
         try {
-            const resp = await fetch("/api/settings/filament-service");
+            const resp = await fetch(withActivePrinterQuery("/api/settings/filament-service"));
             const data = await resp.json();
             if (!resp.ok) {
                 filamentSetSwapSettingsStatus(

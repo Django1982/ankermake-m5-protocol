@@ -1,8 +1,11 @@
+import io
 from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
 import subprocess
 from types import SimpleNamespace
+
+import pytest
 
 from cli.model import Account, Config, Printer
 from web import app
@@ -152,6 +155,85 @@ def test_printer_gcode_route_normalizes_safe_commands_and_blocks_motion_while_pr
     assert safe.status_code == 200
     assert blocked.status_code == 409
     assert sent == ["G28\nM104 S200", "M117 Printing"]
+
+
+@pytest.mark.parametrize("gcode", ["G2 X10 Y10 I5", "G3 X10 Y10 I5", "G92 E0", "M84", "M18", "M420 S0", "M420 S 0"])
+def test_printer_gcode_blocks_expanded_unsafe_commands_while_printing(gcode):
+    sent = []
+    mqtt = SimpleNamespace(
+        is_printing=True,
+        send_gcode=lambda gcode: sent.append(gcode),
+    )
+    client = app.test_client()
+    old_values, old_svc = _install_app_state(mqtt=mqtt)
+
+    try:
+        blocked = client.post(
+            "/api/printer/gcode",
+            json={"gcode": gcode},
+            headers={"X-Api-Key": API_KEY},
+        )
+    finally:
+        _restore_app_state(old_values, old_svc)
+
+    assert blocked.status_code == 409
+    assert sent == []
+
+
+def test_printer_gcode_allows_m420_query_while_printing():
+    sent = []
+    mqtt = SimpleNamespace(
+        is_printing=True,
+        send_gcode=lambda gcode: sent.append(gcode),
+    )
+    client = app.test_client()
+    old_values, old_svc = _install_app_state(mqtt=mqtt)
+
+    try:
+        allowed = client.post(
+            "/api/printer/gcode",
+            json={"gcode": "M420 V"},
+            headers={"X-Api-Key": API_KEY},
+        )
+    finally:
+        _restore_app_state(old_values, old_svc)
+
+    assert allowed.status_code == 200
+    assert sent == ["M420 V"]
+
+
+def test_files_local_blocks_print_start_but_allows_upload_only_while_printing():
+    send_calls = []
+    mqtt = SimpleNamespace(
+        is_printing=True,
+        has_pending_print_start=False,
+        is_preparing_print=False,
+    )
+
+    def fake_send_file(fd, user_name, rate_limit_mbps=None, start_print=False, printer_index=None):
+        send_calls.append(start_print)
+
+    ft = SimpleNamespace(send_file=fake_send_file)
+    client = app.test_client()
+    old_values, old_svc = _install_app_state(mqtt=mqtt, filetransfer=ft)
+
+    try:
+        blocked = client.post(
+            "/api/files/local",
+            data={"print": "true", "file": (io.BytesIO(b"G28\n"), "test.gcode")},
+            headers={"X-Api-Key": API_KEY},
+        )
+        upload_only = client.post(
+            "/api/files/local",
+            data={"print": "false", "file": (io.BytesIO(b"G28\n"), "test.gcode")},
+            headers={"X-Api-Key": API_KEY},
+        )
+    finally:
+        _restore_app_state(old_values, old_svc)
+
+    assert blocked.status_code == 409
+    assert upload_only.status_code == 200
+    assert send_calls == [False]
 
 
 def test_printer_control_and_autolevel_routes_validate_and_dispatch():
@@ -441,6 +523,115 @@ def test_printer_z_offset_routes_refresh_set_and_nudge():
     assert send_calls == ["M290 Z+0.03", "M500", "M290 Z-0.02", "M500"]
 
 
+def test_printer_z_offset_routes_reject_out_of_range_targets():
+    send_calls = []
+    state = {"available": True, "steps": 190, "mm": 1.90, "source": "cached", "seq": 1}
+    mqtt = SimpleNamespace(
+        refresh_z_offset=lambda timeout=None: dict(state),
+        send_gcode=lambda gcode: send_calls.append(gcode),
+        get_z_offset_state=lambda: dict(state),
+    )
+    client = app.test_client()
+    old_values, old_svc = _install_app_state(mqtt=mqtt)
+
+    try:
+        set_resp = client.post(
+            "/api/printer/z-offset",
+            json={"target_mm": 50},
+            headers={"X-Api-Key": API_KEY},
+        )
+        set_resp_neg = client.post(
+            "/api/printer/z-offset",
+            json={"target_mm": -50},
+            headers={"X-Api-Key": API_KEY},
+        )
+        # In-range current (1.90 mm) plus a delta that pushes past the bound.
+        nudge_resp = client.post(
+            "/api/printer/z-offset/nudge",
+            json={"delta_mm": 0.5},
+            headers={"X-Api-Key": API_KEY},
+        )
+    finally:
+        _restore_app_state(old_values, old_svc)
+
+    assert set_resp.status_code == 400
+    assert set_resp_neg.status_code == 400
+    assert nudge_resp.status_code == 400
+    assert "must be between" in set_resp.get_json()["error"]
+    assert send_calls == []
+
+
+def test_printer_control_restart_requires_active_print():
+    control_calls = []
+    mqtt = SimpleNamespace(
+        is_printing=False,
+        has_pending_print_start=False,
+        is_preparing_print=False,
+        send_print_control=lambda value: control_calls.append(value),
+    )
+    client = app.test_client()
+    old_values, old_svc = _install_app_state(mqtt=mqtt)
+
+    try:
+        blocked = client.post(
+            "/api/printer/control",
+            json={"value": 0},
+            headers={"X-Api-Key": API_KEY},
+        )
+        mqtt.is_printing = True
+        allowed = client.post(
+            "/api/printer/control",
+            json={"value": 0},
+            headers={"X-Api-Key": API_KEY},
+        )
+    finally:
+        _restore_app_state(old_values, old_svc)
+
+    assert blocked.status_code == 409
+    assert allowed.status_code == 200
+    assert control_calls == [0]
+
+
+def test_bed_leveling_and_settings_summary_blocked_while_printing():
+    mqtt = SimpleNamespace(is_printing=True)
+    client = app.test_client()
+    old_values, old_svc = _install_app_state(mqtt=mqtt)
+
+    try:
+        bed = client.get("/api/printer/bed-leveling", headers={"X-Api-Key": API_KEY})
+        summary = client.get("/api/printer/settings-summary", headers={"X-Api-Key": API_KEY})
+    finally:
+        _restore_app_state(old_values, old_svc)
+
+    assert bed.status_code == 409
+    assert "while printing" in bed.get_json()["error"]
+    assert summary.status_code == 409
+    assert "while printing" in summary.get_json()["error"]
+
+
+def test_printer_gcode_route_rejects_too_many_lines():
+    sent = []
+    mqtt = SimpleNamespace(
+        is_printing=False,
+        send_gcode=lambda gcode: sent.append(gcode),
+    )
+    client = app.test_client()
+    old_values, old_svc = _install_app_state(mqtt=mqtt)
+
+    try:
+        response = client.post(
+            "/api/printer/gcode",
+            json={"gcode": "\n".join(f"M117 line{i}" for i in range(201))},
+            headers={"X-Api-Key": API_KEY},
+        )
+    finally:
+        _restore_app_state(old_values, old_svc)
+
+    assert response.status_code == 400
+    assert "Too many gcode lines" in response.get_json()["error"]
+    assert sent == []
+
+
 def test_history_routes_require_auth_and_clear_entries():
     calls = []
     history = SimpleNamespace(
@@ -449,6 +640,7 @@ def test_history_routes_require_auth_and_clear_entries():
             or [{"id": 1, "filename": "cube.gcode", "thumbnail_available": False, "printer_index": printer_index}]
         ),
         get_count=lambda printer_index=None: calls.append(("count", printer_index)) or 3,
+        has_active_entry=lambda printer_index=None: False,
         clear=lambda printer_index=None: calls.append(("clear", printer_index)),
     )
     mqtt = SimpleNamespace(history=history)
@@ -475,6 +667,7 @@ def test_history_clear_route_respects_filter_scope():
     history = SimpleNamespace(
         get_history=lambda limit, offset, printer_index=None: [],
         get_count=lambda printer_index=None: 0,
+        has_active_entry=lambda printer_index=None: False,
         clear=lambda printer_index=None: clear_calls.append(printer_index),
     )
     cfg = _base_config()
@@ -504,6 +697,23 @@ def test_history_clear_route_respects_filter_scope():
     assert specific.status_code == 200
     assert all_printers.status_code == 200
     assert clear_calls == [1, 0, None]
+
+
+def test_history_clear_route_rejects_active_print(tmp_path):
+    history = PrintHistory(db_path=tmp_path / "history.db", printer_index=0)
+    active_id = history.record_start("active.gcode", task_id="t-active")
+    mqtt = SimpleNamespace(history=history)
+    client = app.test_client()
+    old_values, old_svc = _install_app_state(mqtt=mqtt)
+
+    try:
+        response = client.delete("/api/history", headers={"X-Api-Key": API_KEY})
+    finally:
+        _restore_app_state(old_values, old_svc)
+
+    assert response.status_code == 409
+    assert "in progress" in response.get_json()["error"]
+    assert history.get_entry(active_id) is not None
 
 
 def test_history_route_uses_requested_or_active_indexed_mqtt_service():
@@ -768,6 +978,36 @@ def test_history_reprint_route_requires_archived_file(tmp_path):
 
     assert response.status_code == 404
     assert "No archived GCode" in response.get_json()["error"]
+
+
+def test_history_reprint_route_handles_archive_vanishing_before_read(tmp_path):
+    # TOCTOU: get_archive_path() succeeds but the file is gone by open() time
+    missing_path = tmp_path / "vanished.gcode"
+    history = SimpleNamespace(
+        get_entry=lambda entry_id: {
+            "id": entry_id,
+            "filename": "vanished.gcode",
+            "archive_relpath": "vanished.gcode",
+            "archive_size": 10,
+        },
+        get_archive_path=lambda entry_id: str(missing_path),
+    )
+    mqtt = SimpleNamespace(
+        is_printing=False,
+        has_pending_print_start=False,
+        is_preparing_print=False,
+        history=history,
+    )
+    client = app.test_client()
+    old_values, old_svc = _install_app_state(mqtt=mqtt, filetransfer=SimpleNamespace(send_bytes=lambda *args, **kwargs: None))
+
+    try:
+        response = client.post("/api/history/1/reprint", headers={"X-Api-Key": API_KEY})
+    finally:
+        _restore_app_state(old_values, old_svc)
+
+    assert response.status_code == 404
+    assert "no longer available" in response.get_json()["error"]
 
 
 def test_timelapse_routes_list_download_delete_and_reject_traversal(tmp_path):

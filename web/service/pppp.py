@@ -1,3 +1,4 @@
+import contextlib
 import json
 import logging
 import threading
@@ -24,6 +25,75 @@ _CONNECT_DEADLINE_SEC = 8.0
 _REPEATED_LOG_COOLDOWN_SEC = 10.0
 _REPEATED_LOG_NOTICE_COUNT = 5
 _LOG_REPEAT_STATE_MAX = 256
+
+# Reconnect backoff for real link flakiness (e.g. brief printer WiFi drops).
+# Without this, a burst of remote CLOSEs/timeouts was retried every ~1s with
+# no growth, hammering the printer for minutes during an outage. A session
+# only "earns back" a clean slate once it has stayed up for a while — a
+# connect that succeeds and immediately drops again keeps escalating.
+_BACKOFF_BASE_SEC = 1.0
+_BACKOFF_CAP_SEC = 8.0
+_STABLE_CONNECTION_SEC = 10.0
+
+# The printer only accepts a single active PPPP session. File transfers open
+# their own dedicated connection (see filetransfer.py) instead of sharing
+# this service's, so without coordination a transfer starting while
+# video/timelapse holds a session causes both sides to race for the
+# printer's one session slot — seen as a "received CLOSE from remote peer"
+# reconnect storm on both ends and the transfer failing outright. These
+# per-service-name locks let a transfer reserve the slot: it stops this
+# service for the duration, and worker_start() below refuses to reconnect
+# while the reservation is held.
+_session_locks = {}
+_session_locks_guard = threading.Lock()
+
+
+def _get_session_lock(service_name):
+    with _session_locks_guard:
+        lock = _session_locks.get(service_name)
+        if lock is None:
+            lock = threading.Lock()
+            _session_locks[service_name] = lock
+        return lock
+
+
+@contextlib.contextmanager
+def reserve_session(printer_index=None):
+    """Exclusively reserve a printer's PPPP session for a file transfer.
+
+    Stops the shared PPPPService for the printer (if it currently wants to
+    be running) so a dedicated file-transfer connection doesn't collide with
+    it, and restarts it afterward. See the module-level comment above
+    _session_locks for why this is necessary.
+    """
+    import web
+
+    service_name = web.resolve_pppp_service_name(printer_index)
+    lock = _get_session_lock(service_name)
+    svc = None
+    was_wanted = False
+    try:
+        with lock:
+            svc = getattr(app.svc, "svcs", {}).get(service_name)
+            was_wanted = bool(svc is not None and svc.wanted)
+            if was_wanted:
+                # Intentionally ignores app.svc.refs (unlike register_services):
+                # the printer only supports one PPPP session, so a file transfer
+                # must preempt video/timelapse holders. VideoQueue self-heals
+                # once the service restarts below.
+                svc.stop()
+                # Field data: an actively streaming video session can take
+                # longer than 5s to fully relinquish its hold; proceeding
+                # before the stop is confirmed makes the transfer connect
+                # against a still-occupied printer session slot.
+                svc.await_stopped(timeout=15.0)
+            yield
+    finally:
+        # Restart outside the lock: worker_start() probes this same lock, and
+        # starting while still holding it makes the service thread lose the
+        # race and eat its default holdoff (~1s) on every upload.
+        if was_wanted:
+            svc.start()
 
 
 def probe_pppp(config, printer_index) -> bool:
@@ -63,7 +133,32 @@ class PPPPService(Service):
         self._handler_lock = threading.Lock()
         self._log_repeat_state = OrderedDict()
         self._connected_event = threading.Event()
+        self._connect_failure_count = 0
+        self._connected_since = None
         super().__init__()
+
+    def _note_connection_lost(self):
+        """Update the reconnect-failure streak and return the backoff delay to use.
+
+        Resets the streak if the connection that was just lost had stayed up
+        for at least _STABLE_CONNECTION_SEC (a real recovery), otherwise
+        escalates it — so a rapid connect/drop/connect/drop cycle backs off
+        instead of hammering the printer every ~1s indefinitely.
+        """
+        connected_since = getattr(self, "_connected_since", None)
+        stable = (
+            connected_since is not None
+            and (datetime.now() - connected_since).total_seconds() >= _STABLE_CONNECTION_SEC
+        )
+        self._connected_since = None
+        if stable:
+            self._connect_failure_count = 0
+        else:
+            self._connect_failure_count = getattr(self, "_connect_failure_count", 0) + 1
+        return min(
+            _BACKOFF_BASE_SEC * (2 ** max(0, self._connect_failure_count - 1)),
+            _BACKOFF_CAP_SEC,
+        )
 
     def await_connected(self, timeout: float = 10.0) -> bool:
         """Block until the PPPP connection is established or *timeout* seconds elapse."""
@@ -79,10 +174,31 @@ class PPPPService(Service):
         if not hasattr(self, "_api"):
             return
         api = self._api
-        # Do not try to send a graceful close packet here. After a video freeze,
-        # that send path can block and leave PPPP half-stopped forever. Force the
-        # transport down locally so the service thread can complete its stop and
-        # be restarted cleanly.
+        # Best-effort notify the printer that this session is over, so it
+        # releases its single PPPP session slot immediately instead of
+        # waiting out its own internal keepalive/timeout. Without this, a
+        # file transfer starting right after (e.g. reserve_session() above)
+        # gets its connect attempts rejected with "received CLOSE from
+        # remote peer" for the printer's entire session timeout, because as
+        # far as the printer knows the old (video) session is still alive.
+        #
+        # This is safe to do even mid-freeze-recovery: unlike
+        # send_xzyh()/send_aabb(), which route through Channel.write() and
+        # can block waiting on a DRW ACK from the printer, AnkerPPPPBaseApi
+        # .send() is a raw, non-blocking sock.sendto() — it never waits for
+        # any response, so it cannot reintroduce the hang this code used to
+        # guard against. We only attempt it while the api still reports
+        # itself Connected; send() raises ConnectionError for Idle/
+        # Disconnected states, which is also the state an already-broken
+        # connection (e.g. one that triggered this force-close) is likely
+        # to be in already, so the guard doubles as a no-op skip in that
+        # case. The unconditional socket teardown below remains the actual
+        # safety net regardless of whether this send succeeds.
+        try:
+            if getattr(api, "state", None) == PPPPState.Connected:
+                api.send(PktClose())
+        except Exception:
+            pass
         try:
             api.state = PPPPState.Disconnected
         except Exception:
@@ -149,8 +265,18 @@ class PPPPService(Service):
         )
 
     def worker_start(self):
-        config = app.config["config"]
+        import web
+
         printer_index = getattr(self, "printer_index", app.config.get("printer_index", 0))
+        service_name = web.resolve_pppp_service_name(printer_index)
+        lock = _get_session_lock(service_name)
+        if not lock.acquire(blocking=False):
+            raise ConnectionError(
+                "PPPP session reserved for a file transfer; retrying shortly"
+            )
+        lock.release()
+
+        config = app.config["config"]
 
         deadline = datetime.now() + timedelta(seconds=_CONNECT_DEADLINE_SEC)
 
@@ -175,7 +301,10 @@ class PPPPService(Service):
                 printer.name,
                 printer.p2p_duid,
             )
-            raise ConnectionRefusedError("No printer IP found; ensure printer is online on the same network")
+            raise ServiceRestartSignal(
+                "No printer IP found; ensure printer is online on the same network",
+                delay=self._note_connection_lost(),
+            )
 
         api = AnkerPPPPAsyncApi.open_lan(Duid.from_string(printer.p2p_duid), host=ip_addr)
         if app.config["pppp_dump"]:
@@ -214,7 +343,9 @@ class PPPPService(Service):
                     ip_addr,
                     getattr(api, "state", None),
                 )
-                raise ConnectionRefusedError("Connection rejected by device")
+                raise ServiceRestartSignal(
+                    "Connection rejected by device", delay=self._note_connection_lost()
+                )
             try:
                 msg = api.recv(timeout=remaining)
                 api.process(msg)
@@ -230,7 +361,9 @@ class PPPPService(Service):
                     printer.name,
                     ip_addr,
                 )
-                raise ConnectionRefusedError("Connection rejected by device")
+                raise ServiceRestartSignal(
+                    "Connection rejected by device", delay=self._note_connection_lost()
+                )
 
         elapsed = (datetime.now() - started_at).total_seconds()
         log.info(
@@ -241,6 +374,7 @@ class PPPPService(Service):
         )
         self._api = api
         self._connected_event.set()
+        self._connected_since = datetime.now()
 
     def _drain_xzyh(self, chan):
         api = getattr(self, "_api", None)
@@ -306,7 +440,9 @@ class PPPPService(Service):
         api = getattr(self, "_api", None)
         if api is None:
             if getattr(self, "wanted", True):
-                raise ServiceRestartSignal("PPPP API missing while service is wanted", delay=0)
+                raise ServiceRestartSignal(
+                "PPPP API missing while service is wanted", delay=self._note_connection_lost()
+            )
             return
 
         # A stale/disconnected API object after video recovery is not a usable
@@ -314,7 +450,10 @@ class PPPPService(Service):
         # forever in a wanted-but-disconnected state.
         if getattr(api, "state", PPPPState.Connected) != PPPPState.Connected:
             if getattr(self, "wanted", True):
-                raise ServiceRestartSignal("PPPP API exists but is not connected while service is wanted", delay=0)
+                raise ServiceRestartSignal(
+                "PPPP API exists but is not connected while service is wanted",
+                delay=self._note_connection_lost(),
+            )
             return
 
         try:
@@ -322,7 +461,7 @@ class PPPPService(Service):
         except (ConnectionResetError, OSError):
             if not getattr(self, "wanted", True):
                 return
-            raise ServiceRestartSignal(delay=0)
+            raise ServiceRestartSignal(delay=self._note_connection_lost())
 
         # Drain all remaining UDP packets without blocking. The 10ms service
         # floor caps us at 100 poll() calls/second, but H.264 video needs many
@@ -339,12 +478,16 @@ class PPPPService(Service):
         api = getattr(self, "_api", None)
         if api is None:
             if getattr(self, "wanted", True):
-                raise ServiceRestartSignal("PPPP API disappeared during worker loop", delay=0)
+                raise ServiceRestartSignal(
+                "PPPP API disappeared during worker loop", delay=self._note_connection_lost()
+            )
             return
 
         if getattr(api, "state", PPPPState.Connected) != PPPPState.Connected:
             if getattr(self, "wanted", True):
-                raise ServiceRestartSignal("PPPP API disconnected during worker loop", delay=0)
+                raise ServiceRestartSignal(
+                "PPPP API disconnected during worker loop", delay=self._note_connection_lost()
+            )
             return
 
         chans = getattr(api, "chans", [])

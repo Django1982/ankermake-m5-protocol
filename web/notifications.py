@@ -407,4 +407,7 @@ class AppriseNotifier:
                 if light_changed:
                     log.info("Apprise snapshot: Restoring light state")
                     restore_state = original_light_state if original_light_state is not None else False
-                    vq.api_light_state(restore_state)
+                    try:
+                        vq.api_light_state(restore_state)
+                    except Exception as err:
+                        log.warning(f"Apprise snapshot: failed to restore light state: {err}")

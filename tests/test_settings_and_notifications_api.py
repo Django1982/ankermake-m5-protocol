@@ -169,6 +169,49 @@ def test_notifications_settings_get_update_and_test(monkeypatch):
     assert created_configs and created_configs[0]["server_url"] == "https://notify.example"
 
 
+def test_notifications_test_rejects_malformed_nested_fields(monkeypatch):
+    client = app.test_client()
+    old, old_svc, _cfg, _mqtt = _install_app_state()
+
+    posts = []
+    monkeypatch.setattr(
+        "web.AppriseClient._post",
+        lambda self, title, body, attachments=None: posts.append((title, body)) or (True, "sent"),
+    )
+
+    try:
+        tested = client.post(
+            "/api/notifications/test",
+            json={"apprise": {"events": "not-a-dict", "progress": "also-not-a-dict"}},
+            headers={"X-Api-Key": "secret-key-123456"},
+        )
+    finally:
+        _restore_app_state(old, old_svc)
+
+    assert tested.status_code != 500
+    assert tested.get_json() is not None
+    assert tested.status_code == 200
+    assert posts
+
+
+def test_notifications_settings_update_normalizes_malformed_nested_fields():
+    client = app.test_client()
+    old, old_svc, cfg, _mqtt = _install_app_state()
+
+    try:
+        updated = client.post(
+            "/api/notifications/settings",
+            json={"apprise": {"events": "not-a-dict", "progress": "also-not-a-dict"}},
+            headers={"X-Api-Key": "secret-key-123456"},
+        )
+    finally:
+        _restore_app_state(old, old_svc)
+
+    assert updated.status_code == 200
+    assert isinstance(cfg.notifications["apprise"]["events"], dict)
+    assert isinstance(cfg.notifications["apprise"]["progress"], dict)
+
+
 def test_timelapse_and_mqtt_settings_endpoints_reload_services():
     client = app.test_client()
     reload_calls = []
@@ -207,6 +250,31 @@ def test_timelapse_and_mqtt_settings_endpoints_reload_services():
     assert reload_calls[1][0] == "ha"
     assert hasattr(reload_calls[0][1], "open")
     assert hasattr(reload_calls[1][1], "modify")
+
+
+def test_mqtt_settings_rejects_non_integer_port():
+    client = app.test_client()
+    old, old_svc, cfg, _mqtt = _install_app_state()
+    original_port = cfg.home_assistant["mqtt_port"]
+
+    try:
+        bad = client.post(
+            "/api/settings/mqtt",
+            json={"home_assistant": {"mqtt_port": "not-a-number"}},
+            headers={"X-Api-Key": "secret-key-123456"},
+        )
+        out_of_range = client.post(
+            "/api/settings/mqtt",
+            json={"home_assistant": {"mqtt_port": 70000}},
+            headers={"X-Api-Key": "secret-key-123456"},
+        )
+    finally:
+        _restore_app_state(old, old_svc)
+
+    assert bad.status_code == 400
+    assert "mqtt_port" in bad.get_json()["error"]
+    assert out_of_range.status_code == 400
+    assert cfg.home_assistant["mqtt_port"] == original_port
 
 
 def test_camera_settings_endpoints_persist_per_printer():
@@ -397,8 +465,47 @@ def test_filament_service_settings_endpoints_persist_manual_and_legacy_modes():
     assert cfg.filament_service["swap_unload_length_mm"] == 55
     assert cfg.filament_service["swap_load_length_mm"] == 65
     assert cfg.filament_service["swap_home_pause_s"] == 42
-    assert cfg.filament_service["manual_swap_preheat_temp_c"] == 300
-    assert clamped.get_json()["filament_service"]["manual_swap_preheat_temp_c"] == 300
+    assert cfg.filament_service["manual_swap_preheat_temp_c"] == 260
+    assert clamped.get_json()["filament_service"]["manual_swap_preheat_temp_c"] == 260
+
+
+def test_filament_service_settings_route_reads_and_writes_all_metal_hotend():
+    client = app.test_client()
+    cfg = _base_config()
+    cfg.printers.append(_printer(sn="SN2", name="Printer 2"))
+    old, old_svc, cfg, _mqtt = _install_app_state(cfg=cfg)
+
+    try:
+        before = client.get(
+            "/api/settings/filament-service?printer_index=0",
+            headers={"X-Api-Key": "secret-key-123456"},
+        )
+        updated = client.post(
+            "/api/settings/filament-service?printer_index=0",
+            json={"filament_service": {"all_metal_hotend": True}},
+            headers={"X-Api-Key": "secret-key-123456"},
+        )
+        first_printer = client.get(
+            "/api/settings/filament-service?printer_index=0",
+            headers={"X-Api-Key": "secret-key-123456"},
+        )
+        second_printer = client.get(
+            "/api/settings/filament-service?printer_index=1",
+            headers={"X-Api-Key": "secret-key-123456"},
+        )
+    finally:
+        _restore_app_state(old, old_svc)
+
+    assert before.status_code == 200
+    assert before.get_json()["filament_service"]["all_metal_hotend"] is False
+    assert updated.status_code == 200
+    assert updated.get_json()["filament_service"]["all_metal_hotend"] is True
+    assert first_printer.status_code == 200
+    assert first_printer.get_json()["filament_service"]["all_metal_hotend"] is True
+    assert second_printer.status_code == 200
+    assert second_printer.get_json()["filament_service"]["all_metal_hotend"] is False
+    assert cfg.filament_service["per_printer"]["SN1"]["all_metal_hotend"] is True
+    assert "SN2" not in cfg.filament_service["per_printer"]
 
 
 def test_filament_service_advanced_command_config_creates_and_opens(tmp_path, monkeypatch):

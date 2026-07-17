@@ -87,6 +87,11 @@ def config_show(config: object):
     return config_output
 
 
+MAX_LOGIN_FILE_BYTES = 8 * 1024 * 1024  # real login.json/leveldb caches are tiny; the generic
+                                          # upload size cap (UPLOAD_MAX_MB, default 512MB) exists
+                                          # for GCode uploads and is far too permissive here.
+
+
 def config_import(login_file: object, config: object):
     """
     Loads the configuration from the API. login_file is a file object containing the user's login information,
@@ -100,8 +105,14 @@ def config_import(login_file: object, config: object):
     - config_output: A formatted string containing the configuration information.
     """
     # get the login data
+    raw = login_file.stream.read(MAX_LOGIN_FILE_BYTES + 1)
+    if len(raw) > MAX_LOGIN_FILE_BYTES:
+        raise ConfigImportError(
+            f"Login file is too large (must be under {MAX_LOGIN_FILE_BYTES // (1024 * 1024)}MB)"
+        )
+
     try:
-        cache = libflagship.logincache.load(login_file.stream.read())
+        cache = libflagship.logincache.load(raw)
     except (json.JSONDecodeError, UnicodeDecodeError, ValueError) as err:
         raise ConfigImportError(f"Failed to parse login file or slicer cache: {err}")
 

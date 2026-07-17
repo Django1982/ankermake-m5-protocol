@@ -109,6 +109,37 @@ class TestAPIDecorators:
         assert result == {"result": "value"}
 
     @patch('requests.get')
+    def test_unwrap_api_redacts_secrets_from_debug_log(self, mock_get, caplog):
+        """unwrap_api must not leak auth tokens / device secrets into DEBUG logs"""
+        import logging
+
+        @unwrap_api
+        def dummy_method(self):
+            return mock_get.return_value
+
+        mock_response = Mock()
+        mock_response.ok = True
+        mock_response.json.return_value = {
+            "code": 0,
+            "data": {
+                "auth_token": "deadbeefcafebabe0123456789abcdef01234567",
+                "dsk_keys": [{"station_sn": "SN1", "dsk_key": "super-secret-dsk"}],
+                "user_id": "user-123",
+            },
+        }
+        mock_get.return_value = mock_response
+
+        mock_self = Mock()
+        mock_self.scope = "/test"
+
+        with caplog.at_level(logging.DEBUG):
+            dummy_method(mock_self)
+
+        assert "deadbeefcafebabe" not in caplog.text
+        assert "super-secret-dsk" not in caplog.text
+        assert "user-123" in caplog.text  # non-sensitive fields still logged for debugging
+
+    @patch('requests.get')
     def test_unwrap_api_raises_on_non_zero_code(self, mock_get):
         """unwrap_api raises APIError when API returns error code"""
 

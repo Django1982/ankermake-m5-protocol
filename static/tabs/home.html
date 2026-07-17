@@ -414,29 +414,33 @@
                                 </div>
                             </div>
                         </div>
-                        <div class="row g-3">
-                            <div class="col-md-6">
-                                <div class="input-group">
-                                    <div class="input-group-text print-info-label" id="printLayer">
-                                        {{ macro.bi_icon("layers-half") }}
-                                    </div>
-                                    <span id="print-layer" class="form-control text-center" title="Print Layers"
-                                        aria-describedby="printLayer">
-                                        0/0
-                                    </span>
+                        <div class="print-telemetry-grid">
+                            <div class="print-telemetry-item">
+                                <div class="print-telemetry-heading">
+                                    {{ macro.bi_icon("layers-half", class="print-telemetry-icon") }}
+                                    <div class="print-telemetry-label">Layer</div>
+                                </div>
+                                <div id="print-layer" class="print-telemetry-value">0 / 0</div>
+                            </div>
+                            <div class="print-telemetry-item">
+                                <div class="print-telemetry-heading">
+                                    {{ macro.bi_icon("speedometer", class="print-telemetry-icon") }}
+                                    <div class="print-telemetry-label">Speed</div>
+                                </div>
+                                <div id="print-speed" class="print-telemetry-value print-telemetry-value-speed">0 mm/s</div>
+                            </div>
+                            <div class="print-telemetry-item">
+                                <div class="print-telemetry-heading">
+                                    {{ macro.bi_icon("fan", class="print-telemetry-icon") }}
+                                    <div class="print-telemetry-label">Fan</div>
+                                </div>
+                                <div id="fan-speed" class="print-telemetry-value">– %</div>
+                                <div class="fan-speed-meter" aria-hidden="true">
+                                    <span id="fan-speed-meter-fill"></span>
                                 </div>
                             </div>
-                            <div class="col-md-6">
-                                <div class="input-group">
-                                    <div class="input-group-text print-info-label" id="printSpeed">
-                                        {{ macro.bi_icon("speedometer") }}
-                                    </div>
-                                    <span id="print-speed" class="form-control text-center small" title="Print Speed"
-                                        aria-describedby="printSpeed">
-                                        0mm/s
-                                    </span>
-                                </div>
-                            </div>
+                        </div>
+                        <div class="row g-3 mt-0">
                             <div class="col-12">
                                 <div class="input-group">
                                     <div class="input-group-text print-info-label" id="filamentState">

@@ -149,12 +149,16 @@ class MqttQueue(Service):
                 printer = cfg.printers[self.printer_index]
                 printer_sn = getattr(printer, "sn", None)
                 printer_name = getattr(printer, "name", None) or "AnkerMake M5"
-        self._ha = HomeAssistantService(
-            app.config["config"],
-            printer_sn=printer_sn,
-            printer_name=printer_name,
-            printer_index=self.printer_index,
-        )
+        try:
+            self._ha = HomeAssistantService(
+                app.config["config"],
+                printer_sn=printer_sn,
+                printer_name=printer_name,
+                printer_index=self.printer_index,
+            )
+        except Exception as err:
+            log.error(f"HomeAssistantService init failed, HA integration disabled: {err}", exc_info=True)
+            self._ha = None
         # HomeAssistantService.__init__ calls reload_config() which calls start()
         # when enabled, so no explicit start() call is needed here.
         self._printer_name = printer_name or "AnkerMake M5"
@@ -169,6 +173,7 @@ class MqttQueue(Service):
         self._nozzle_temp_updated_at = 0.0
         self._bed_temp = None
         self._bed_temp_target = None
+        self._fan_speed = None
         self._z_offset_steps = None
         self._z_offset_updated_at = 0.0
         self._z_offset_seq = 0
@@ -179,6 +184,9 @@ class MqttQueue(Service):
         self._filament_change_step_len = None
         self._filament_issue = None
         self._filament_issue_code = None
+        self._filament_vendor = None
+        self._filament_type = None
+        self._filament_metadata_source = None
         self._pause_reason = None
         self._filament_runout_pending = False
         self._filament_runout_pending_at = 0.0
@@ -200,6 +208,12 @@ class MqttQueue(Service):
         """Store the layer count extracted from a GCode header for UI display."""
         self._gcode_layer_count = count
 
+    def set_gcode_filament_info(self, vendor=None, type=None):
+        """Store slicer filament metadata for the next print."""
+        self._filament_vendor = self._clean_filament_metadata(vendor)
+        self._filament_type = self._clean_filament_metadata(type)
+        self._filament_metadata_source = "gcode" if self._filament_vendor or self._filament_type else None
+
     def reset_reconnect_backoff(self):
         """Cancel any reconnect back-off and attempt connection immediately.
 
@@ -217,7 +231,12 @@ class MqttQueue(Service):
             app.config["insecure"],
             mqtt_ca_cert,
         )
-        self._reset_print_state()
+        # A reconnect is a connection-layer event, not the end of a print: the
+        # printer's own state (task_id, filename, progress) self-heals from the
+        # next live telemetry, but filament vendor/type has no telemetry source
+        # to re-derive from (it's a one-shot value pushed from the GCode header
+        # at upload time), so it must not be wiped here or it is lost for good.
+        self._reset_print_state(preserve_filament_metadata=True)
         self._ha.start()
         self._ha.update_state(mqtt_connected=True)
         self._last_query = 0
@@ -226,7 +245,7 @@ class MqttQueue(Service):
             time.monotonic() + TIMELAPSE_START_PROMPT_BOOT_WINDOW_SEC
         )
 
-    def _reset_print_state(self):
+    def _reset_print_state(self, preserve_filament_metadata=False):
         self._state = PrintState.IDLE
         self._last_state_value = 0
         self._print_started_at = None
@@ -247,6 +266,10 @@ class MqttQueue(Service):
         self._last_print_schedule_filename = None
         self._last_print_schedule_seen_at = 0.0
         self._pending_prepare_state_logged = False
+        if not preserve_filament_metadata:
+            self._filament_vendor = None
+            self._filament_type = None
+            self._filament_metadata_source = None
         self._clear_timelapse_start_offer()
         self._pause_reason = None
         self._filament_runout_pending = False
@@ -479,6 +502,34 @@ class MqttQueue(Service):
 
     _FILENAME_SANITIZE_RE = re.compile(r'[^\w.\-]')
     _MULTI_DOT_RE = re.compile(r'\.{2,}')
+    _FILAMENT_TYPE_FROM_FILENAME_RE = re.compile(
+        r"(?:^|[_\-\s.])(PLA|PETG|ABS|ASA|TPU|PC|PA|NYLON|PVA|HIPS)(?:$|[_\-\s.])",
+        re.IGNORECASE,
+    )
+
+    @staticmethod
+    def _clean_filament_metadata(value):
+        cleaned = str(value or "").strip().strip('"').strip()
+        return cleaned or None
+
+    def _infer_filament_type_from_filename(self, filename):
+        if self._filament_metadata_source == "gcode":
+            return
+        match = self._FILAMENT_TYPE_FROM_FILENAME_RE.search(os.path.basename(str(filename or "")))
+        self._filament_vendor = None
+        self._filament_type = match.group(1).upper() if match else None
+        self._filament_metadata_source = "filename" if match else None
+
+    def _filament_material_label(self):
+        parts = [
+            value
+            for value in (
+                getattr(self, "_filament_vendor", None),
+                getattr(self, "_filament_type", None),
+            )
+            if value
+        ]
+        return " ".join(parts) if parts else None
 
     @staticmethod
     def _normalize_pending_archive_filename(filename):
@@ -524,6 +575,7 @@ class MqttQueue(Service):
         with self._state_lock:
             if filename:
                 self._last_filename = filename
+                self._infer_filament_type_from_filename(filename)
             if task_id:
                 self._last_task_id = task_id
             if archive_info and archive_info.get("archive_relpath"):
@@ -895,6 +947,8 @@ class MqttQueue(Service):
                 self._print_state_event.set()
 
     def worker_stop(self):
+        if getattr(self, "_timelapse", None):
+            self._timelapse.handle_mqtt_service_stopped()
         self._ha.update_state(mqtt_connected=False)
         self._ha.stop()
         if hasattr(self, "client"):
@@ -1237,9 +1291,18 @@ class MqttQueue(Service):
                 self._bed_temp_target = self._normalize_temp(target)
                 ha_updates["bed_temp_target"] = self._bed_temp_target
 
+        # Part cooling fan speed (command 1005 = 0x03ed), reported as percent.
+        elif command_type == MqttMsgType.ZZ_MQTT_CMD_FAN_SPEED:
+            speed_raw = payload.get("value") if "value" in payload else payload.get("speed")
+            speed = self._safe_int(speed_raw)
+            if speed is not None:
+                self._fan_speed = max(0, min(100, speed))
+                ha_updates["fan_speed"] = self._fan_speed
+
         # Print speed (command 1006 = 0x03ee)
         elif command_type == MqttMsgType.ZZ_MQTT_CMD_PRINT_SPEED:
-            speed = self._safe_int(payload.get("value") or payload.get("speed"))
+            speed_raw = payload.get("value") if "value" in payload else payload.get("speed")
+            speed = self._safe_int(speed_raw)
             if speed is not None:
                 ha_updates["print_speed"] = speed
 
@@ -1497,6 +1560,7 @@ class MqttQueue(Service):
                     filename = self._last_filename
             else:
                 self._last_filename = filename
+                self._infer_filament_type_from_filename(filename)
             self._complete_deferred_print_start()
 
         pending_name = os.path.basename(self._pending_stored_file_path) if self._pending_stored_file_path else None
@@ -1690,10 +1754,17 @@ class MqttQueue(Service):
                 "bed": self._bed_temp,
                 "bed_target": self._bed_temp_target,
             },
+            "telemetry": {
+                "fan_speed": self._fan_speed,
+            },
             "z_offset": self.get_z_offset_state(),
             "filament": {
                 "state": getattr(self, "_filament_state", "unknown"),
                 "label": FILAMENT_STATE_LABELS.get(getattr(self, "_filament_state", "unknown"), "Unknown"),
+                "material_label": self._filament_material_label(),
+                "vendor": getattr(self, "_filament_vendor", None),
+                "type": getattr(self, "_filament_type", None),
+                "metadata_source": getattr(self, "_filament_metadata_source", None),
                 "loaded": True if getattr(self, "_filament_state", "unknown") == "loaded" else None,
                 "issue": getattr(self, "_filament_issue", None),
                 "issue_label": FILAMENT_ISSUE_LABELS.get(getattr(self, "_filament_issue", None)),
@@ -1869,6 +1940,9 @@ class MqttQueue(Service):
                 "totalLayer": total_layers,
             }
             self.notify(sim_payload)
+
+        else:
+            log.warning(f"simulate_event: unknown event type {event_type!r}")
 
     def send_gcode(self, gcode):
         if not gcode:

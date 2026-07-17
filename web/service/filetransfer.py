@@ -10,7 +10,8 @@ from libflagship.ppppapi import FileUploadInfo, PPPPError
 
 import cli.util
 import cli.pppp
-from cli.util import patch_gcode_time, extract_layer_count
+from cli.util import patch_gcode_time, extract_filament_info, extract_layer_count
+from .pppp import reserve_session
 
 log = logging.getLogger(__name__)
 
@@ -21,6 +22,14 @@ from ..notifications import AppriseNotifier, format_bytes
 class FileTransferService(Service):
 
     REPLY_TIMEOUT = 10.0
+    # Generous window for the initial connect, since it now retries (see
+    # cli.pppp.pppp_open) instead of failing on the printer's first
+    # rejection — the printer can need a few seconds to free its PPPP
+    # session slot after reserve_session() stops the shared video session.
+    # Field data showed a genuinely active video stream can hold the
+    # printer's session slot for well over 25s; uploads are not
+    # latency-sensitive, so a slow success beats a hard failure.
+    CONNECT_TIMEOUT = 60.0
     PROGRESS_INTERVAL = 0.25
 
     def worker_init(self):
@@ -57,15 +66,26 @@ class FileTransferService(Service):
         archive_info=None,
     ):
         layer_count = extract_layer_count(raw)
+        filament_info = extract_filament_info(raw)
         data = patch_gcode_time(raw)
         start_print_flag = bool(start_print)
-        if layer_count is not None:
+        if layer_count is not None or filament_info:
             try:
                 with borrow_mqtt(printer_index) as mqtt:
-                    mqtt.set_gcode_layer_count(layer_count)
-                log.info(f"GCode layer count from header: {layer_count}")
+                    if layer_count is not None:
+                        mqtt.set_gcode_layer_count(layer_count)
+                    if filament_info:
+                        mqtt.set_gcode_filament_info(**filament_info)
+                if layer_count is not None:
+                    log.info(f"GCode layer count from header: {layer_count}")
+                if filament_info:
+                    log.info(
+                        "GCode filament metadata: vendor=%r type=%r",
+                        filament_info.get("vendor"),
+                        filament_info.get("type"),
+                    )
             except Exception as e:
-                log.warning(f"Could not store layer count in mqttqueue: {e}")
+                log.warning(f"Could not store GCode metadata in mqttqueue: {e}")
         user_id = "-"
         try:
             with app.config["config"].open() as cfg:
@@ -105,65 +125,66 @@ class FileTransferService(Service):
                 "start_print": start_print_flag,
             })
         effective_printer_index = printer_index if printer_index is not None else app.config.get("printer_index", 0)
-        try:
-            api = cli.pppp.pppp_open(
-                app.config["config"],
-                effective_printer_index,
-                timeout=self.REPLY_TIMEOUT,
-                dumpfile=pppp_dump,
-            )
-        except Exception as e:
-            self._notify_upload({"status": "error", "name": upload_name, "error": str(e), "start_print": start_print_flag})
-            raise ConnectionError(f"No pppp connection to printer: {e}") from e
-        try:
-            cli.pppp.pppp_send_file(
-                api,
-                fui,
-                data,
-                rate_limit_mbps=rate_limit_mbps,
-                progress_cb=progress_cb,
-                show_progress=False,
-            )
-            if start_print:
-                log.info("File upload complete. Requesting print start of job.")
-                api.aabb_request(b"", frametype=FileTransfer.END, timeout=15.0)
-                try:
-                    with borrow_mqtt(printer_index) as mqtt:
-                        try:
-                            mqtt.mark_pending_print_start(upload_name, archive_info=archive_info)
-                        except TypeError:
-                            mqtt.mark_pending_print_start(upload_name)
-                except Exception as e:
-                    log.warning(f"Could not mark pending print start in mqttqueue: {e}")
+        with reserve_session(effective_printer_index):
+            try:
+                api = cli.pppp.pppp_open(
+                    app.config["config"],
+                    effective_printer_index,
+                    timeout=self.CONNECT_TIMEOUT,
+                    dumpfile=pppp_dump,
+                )
+            except Exception as e:
+                self._notify_upload({"status": "error", "name": upload_name, "error": str(e), "start_print": start_print_flag})
+                raise ConnectionError(f"No pppp connection to printer: {e}") from e
+            try:
+                cli.pppp.pppp_send_file(
+                    api,
+                    fui,
+                    data,
+                    rate_limit_mbps=rate_limit_mbps,
+                    progress_cb=progress_cb,
+                    show_progress=False,
+                )
+                if start_print:
+                    log.info("File upload complete. Requesting print start of job.")
+                    api.aabb_request(b"", frametype=FileTransfer.END, timeout=15.0)
+                    try:
+                        with borrow_mqtt(printer_index) as mqtt:
+                            try:
+                                mqtt.mark_pending_print_start(upload_name, archive_info=archive_info)
+                            except TypeError:
+                                mqtt.mark_pending_print_start(upload_name)
+                    except Exception as e:
+                        log.warning(f"Could not mark pending print start in mqttqueue: {e}")
+                else:
+                    log.info("File upload complete (upload-only)")
+            except ConnectionError as e:
+                log.error(f"Could not send print job: {e}")
+                self._notify_upload({"status": "error", "name": upload_name, "error": str(e), "start_print": start_print_flag})
+                raise
+            except (PPPPError, OSError, EOFError, TimeoutError) as e:
+                log.error(f"Could not send print job: {e}")
+                self._notify_upload({"status": "error", "name": upload_name, "error": str(e), "start_print": start_print_flag})
+                raise ConnectionError(f"PPPP transfer failed: {e}") from e
+            except Exception as e:
+                log.error(f"Could not send print job: {e}")
+                self._notify_upload({"status": "error", "name": upload_name, "error": str(e), "start_print": start_print_flag})
+                raise
             else:
-                log.info("File upload complete (upload-only)")
-        except ConnectionError as e:
-            log.error(f"Could not send print job: {e}")
-            self._notify_upload({"status": "error", "name": upload_name, "error": str(e), "start_print": start_print_flag})
-            raise
-        except (PPPPError, OSError, EOFError, TimeoutError) as e:
-            log.error(f"Could not send print job: {e}")
-            self._notify_upload({"status": "error", "name": upload_name, "error": str(e), "start_print": start_print_flag})
-            raise ConnectionError(f"PPPP transfer failed: {e}") from e
-        except Exception as e:
-            log.error(f"Could not send print job: {e}")
-            self._notify_upload({"status": "error", "name": upload_name, "error": str(e), "start_print": start_print_flag})
-            raise
-        else:
-            if start_print:
-                log.info("Successfully sent print job")
-            else:
-                log.info("Successfully uploaded file")
-            self._notify_upload({
-                "status": "done",
-                "name": upload_name,
-                "size": fui.size,
-                "sent": fui.size,
-                "start_print": start_print_flag,
-            })
-            self._notify_apprise_upload(upload_name, fui.size, start_print)
-        finally:
-            api.stop()
+                if start_print:
+                    log.info("Successfully sent print job")
+                else:
+                    log.info("Successfully uploaded file")
+                self._notify_upload({
+                    "status": "done",
+                    "name": upload_name,
+                    "size": fui.size,
+                    "sent": fui.size,
+                    "start_print": start_print_flag,
+                })
+                self._notify_apprise_upload(upload_name, fui.size, start_print)
+            finally:
+                api.stop()
 
     def _notify_apprise_upload(self, filename, size_bytes, start_print):
         payload = {

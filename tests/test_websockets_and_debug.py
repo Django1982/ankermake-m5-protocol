@@ -271,6 +271,31 @@ def test_ctrl_light_uses_active_pppp_without_videoqueue():
     ]
 
 
+def test_ctrl_survives_unexpected_error_and_keeps_processing():
+    light_calls = []
+    videoqueue = SimpleNamespace(
+        saved_video_profile_id="hd",
+        api_light_state=lambda enabled: light_calls.append(enabled),
+    )
+    services = FakeServices(
+        svcs={"videoqueue": videoqueue},
+        refs={"videoqueue": 0},
+    )
+    old_values, old_svc = _install_app_state(web_module, svc=services)
+
+    try:
+        ctrl_sock = FakeSock(receives=[
+            RuntimeError("boom"),
+            json.dumps({"light": True}),
+            None,
+        ])
+        _ws_handler(web_module, "ctrl")(ctrl_sock)
+    finally:
+        _restore_app_state(web_module, old_values, old_svc)
+
+    assert light_calls == [True]
+
+
 def test_nonzero_printer_services_do_not_fallback_to_legacy_instances():
     viewer_events = []
     printer_two_video = SimpleNamespace(
@@ -329,6 +354,66 @@ def test_nonzero_printer_services_do_not_fallback_to_legacy_instances():
     assert resolved_video is printer_two_video
     assert resolved_video_name == web_module.video_service_name(1)
     assert resolved_pppp_name == web_module.pppp_service_name(1)
+
+
+def test_ws_video_uses_requested_printer_camera_support_not_active_printer():
+    """Regression: /ws/video must gate on the REQUESTED printer_index's camera
+    support, not app.config['video_supported'], which only reflects whichever
+    printer is globally active."""
+    cfg = _base_config()
+    cfg.printers[0].model = "V8110"  # active printer has no camera
+    cfg.printers[1].model = "V8111"  # requested printer has a camera
+
+    printer_two_video = SimpleNamespace(
+        saved_video_profile_id="hd",
+        viewer_connected=lambda: None,
+        viewer_disconnected=lambda: None,
+    )
+    services = FakeServices(
+        streams={web_module.video_service_name(1): [SimpleNamespace(data=b"printer-two-frame")]},
+        borrowed={web_module.video_service_name(1): printer_two_video},
+        svcs={web_module.video_service_name(1): printer_two_video},
+        refs={web_module.video_service_name(1): 0},
+    )
+    old_values, old_svc = _install_app_state(
+        web_module, svc=services, config=FakeConfigManager(cfg),
+        printer_index=0, video_supported=False,
+    )
+    try:
+        with web_module.app.test_request_context("/ws/video?printer_index=1"):
+            sock = FakeSock(close_after_sends=1)
+            _ws_handler(web_module, "video")(sock)
+    finally:
+        _restore_app_state(web_module, old_values, old_svc)
+
+    assert sock.sent == [b"printer-two-frame"]
+
+
+def test_ws_mqtt_uses_requested_printer_unsupported_status_not_active_printer():
+    """Regression: /ws/mqtt (and /ws/pppp-state, /ws/ctrl) must gate on
+    whether the REQUESTED printer_index is an unsupported model, not
+    app.config['unsupported_device'], which only reflects whichever printer
+    is globally active."""
+    cfg = _base_config()
+    cfg.printers[0].model = "V8260"  # active printer is unsupported (blocked)
+    cfg.printers[1].model = "V8111"  # requested printer is fully supported
+
+    services = FakeServices(
+        streams={web_module.mqtt_service_name(1): [{"hello": "mqtt-1"}]},
+        svcs={web_module.mqtt_service_name(1): SimpleNamespace(name="mqtt-1")},
+    )
+    old_values, old_svc = _install_app_state(
+        web_module, svc=services, config=FakeConfigManager(cfg),
+        printer_index=0, unsupported_device=True,
+    )
+    try:
+        with web_module.app.test_request_context("/ws/mqtt?printer_index=1"):
+            sock = FakeSock(close_after_sends=1)
+            _ws_handler(web_module, "mqtt")(sock)
+    finally:
+        _restore_app_state(web_module, old_values, old_svc)
+
+    assert sock.sent == [json.dumps({"hello": "mqtt-1"})]
 
 
 def test_pppp_probe_helper_and_state_websocket_emit_status(monkeypatch):
@@ -548,6 +633,144 @@ def test_dev_debug_routes_register_and_dispatch(monkeypatch):
     assert restart_calls == [True]
 
 
+def test_dev_debug_bed_leveling_blocked_while_printing(monkeypatch):
+    monkeypatch.setenv("ANKERCTL_DEV_MODE", "true")
+    importlib.reload(web_module)
+
+    try:
+        app = web_module.app
+        client = app.test_client()
+        mqtt_name = web_module.mqtt_service_name(0)
+        app.svc = SimpleNamespace(
+            svcs={mqtt_name: SimpleNamespace(is_printing=True)},
+            refs={mqtt_name: 1},
+        )
+        app.config["api_key"] = API_KEY
+        app.config["login"] = True
+        app.config["config"] = FakeConfigManager(_base_config())
+        app.config["printer_index"] = 0
+
+        response = client.get("/api/debug/bed-leveling", headers={"X-Api-Key": API_KEY})
+    finally:
+        monkeypatch.setenv("ANKERCTL_DEV_MODE", "false")
+        importlib.reload(web_module)
+
+    assert response.status_code == 409
+    assert "while printing" in response.get_json()["error"]
+
+
+def test_debug_printer_report_blocked_while_printing(monkeypatch):
+    monkeypatch.setenv("ANKERCTL_DEV_MODE", "true")
+    importlib.reload(web_module)
+
+    try:
+        app = web_module.app
+        client = app.test_client()
+        report_calls = []
+        mqtt_name = web_module.mqtt_service_name(0)
+        app.svc = SimpleNamespace(
+            svcs={mqtt_name: SimpleNamespace(is_printing=True)},
+            refs={mqtt_name: 1},
+        )
+        app.config["api_key"] = API_KEY
+        app.config["login"] = True
+        app.config["config"] = FakeConfigManager(_base_config())
+        app.config["printer_index"] = 0
+
+        monkeypatch.setattr(
+            "web._read_printer_report",
+            lambda name, printer_index=None, client=None: report_calls.append(name) or {},
+        )
+
+        response = client.get(
+            "/api/debug/printer-report/settings", headers={"X-Api-Key": API_KEY}
+        )
+    finally:
+        monkeypatch.setenv("ANKERCTL_DEV_MODE", "false")
+        importlib.reload(web_module)
+
+    assert response.status_code == 409
+    assert "while printing" in response.get_json()["error"]
+    assert report_calls == []
+
+
+def test_debug_simulate_lifecycle_blocked_while_printing(monkeypatch):
+    monkeypatch.setenv("ANKERCTL_DEV_MODE", "true")
+    importlib.reload(web_module)
+
+    try:
+        app = web_module.app
+        client = app.test_client()
+        simulated = []
+        mqtt_name = web_module.mqtt_service_name(0)
+        mqtt = SimpleNamespace(
+            is_printing=True,
+            simulate_event=lambda event_type, payload: simulated.append((event_type, payload)),
+        )
+        app.svc = SimpleNamespace(
+            borrow=lambda name: _borrow_debug(mqtt if name == mqtt_name else None),
+            svcs={mqtt_name: mqtt},
+            refs={mqtt_name: 1},
+        )
+        app.config["api_key"] = API_KEY
+        app.config["login"] = True
+        app.config["config"] = FakeConfigManager(_base_config())
+        app.config["printer_index"] = 0
+
+        blocked = client.post(
+            "/api/debug/simulate",
+            json={"type": "finish", "payload": {"filename": "cube.gcode"}},
+            headers={"X-Api-Key": API_KEY},
+        )
+        allowed = client.post(
+            "/api/debug/simulate",
+            json={"type": "progress", "payload": {"progress": 42}},
+            headers={"X-Api-Key": API_KEY},
+        )
+    finally:
+        monkeypatch.setenv("ANKERCTL_DEV_MODE", "false")
+        importlib.reload(web_module)
+
+    assert blocked.status_code == 409
+    assert "real print" in blocked.get_json()["error"]
+    assert allowed.status_code == 200
+    assert simulated == [("progress", {"progress": 42})]
+
+
+def test_debug_state_uses_requested_printer_index(monkeypatch):
+    monkeypatch.setenv("ANKERCTL_DEV_MODE", "true")
+    importlib.reload(web_module)
+
+    try:
+        app = web_module.app
+        client = app.test_client()
+        mqtt_zero = SimpleNamespace(get_state=lambda: {"printer": 0})
+        mqtt_one = SimpleNamespace(get_state=lambda: {"printer": 1})
+        borrowed = {
+            web_module.mqtt_service_name(0): mqtt_zero,
+            web_module.mqtt_service_name(1): mqtt_one,
+        }
+        app.svc = SimpleNamespace(
+            borrow=lambda name: _borrow_debug(borrowed.get(name)),
+            svcs={name: svc for name, svc in borrowed.items()},
+            refs={name: 1 for name in borrowed},
+        )
+        app.config["api_key"] = API_KEY
+        app.config["login"] = True
+        app.config["config"] = FakeConfigManager(_base_config())
+        app.config["printer_index"] = 0
+
+        response = client.get(
+            "/api/debug/state?printer_index=1", headers={"X-Api-Key": API_KEY}
+        )
+    finally:
+        monkeypatch.setenv("ANKERCTL_DEV_MODE", "false")
+        importlib.reload(web_module)
+
+    assert response.status_code == 200
+    assert response.get_json() == {"printer": 1}
+
+
 def test_ws_ctrl_rejects_without_api_key():
     """WebSocket handlers must reject unauthenticated connections when
     an API key is configured, sending {"error": "unauthorized"} before closing."""
@@ -597,6 +820,65 @@ def test_ws_ctrl_allows_with_session():
     # Should have received ankerctl handshake + video_profile + processed light command
     assert any('"ankerctl"' in s for s in sock.sent)
     assert light_calls == [True]
+
+
+def test_all_ws_routes_reject_without_api_key():
+    """Every websocket route must call _validate_ws_auth() and reject a
+    connection when an API key is configured but the caller has no session
+    cookie or X-Api-Key header.
+
+    Flask's before_request middleware runs for websocket routes but does not
+    block unauthenticated GETs on them, so each handler calls
+    _validate_ws_auth() inline. A route that omits this call is a full,
+    silent auth bypass — this test exists to catch exactly that regression
+    across all five ws routes, not just /ws/ctrl.
+    """
+    services = FakeServices()
+    old_values, old_svc = _install_app_state(
+        web_module, svc=services, api_key=API_KEY
+    )
+
+    try:
+        with web_module.app.test_request_context():
+            for name in ("mqtt", "video", "pppp_state", "upload", "ctrl"):
+                sock = FakeSock()
+                _ws_handler(web_module, name)(sock)
+                assert len(sock.sent) == 1, f"ws route '{name}' sent {len(sock.sent)} messages, expected 1 rejection"
+                msg = json.loads(sock.sent[0])
+                assert msg == {"error": "unauthorized"}, f"ws route '{name}' did not reject an unauthenticated connection"
+    finally:
+        _restore_app_state(web_module, old_values, old_svc)
+
+
+def test_sock_server_options_configures_ping_interval():
+    """Regression guard: without a ping/pong keepalive, half-open clients
+    (laptop sleep, network partition) leave zombie server threads and
+    service queue taps alive indefinitely."""
+    assert web_module.app.config.get("SOCK_SERVER_OPTIONS", {}).get("ping_interval")
+
+
+def test_ws_route_apikey_query_param_does_not_redirect():
+    """A WS handshake with a valid ?apikey= must not get a redirect —
+    the WebSocket handshake never follows redirects, so this would
+    silently break any programmatic client using the documented
+    apikey-query-param pattern."""
+    services = FakeServices()
+    old_values, old_svc = _install_app_state(web_module, svc=services, api_key=API_KEY)
+    try:
+        resp = web_module.app.test_client().get("/ws/mqtt", query_string={"apikey": API_KEY})
+        assert resp.status_code != 302
+    finally:
+        _restore_app_state(web_module, old_values, old_svc)
+
+
+def test_validate_ws_auth_accepts_apikey_query_param():
+    services = FakeServices()
+    old_values, old_svc = _install_app_state(web_module, svc=services, api_key=API_KEY)
+    try:
+        with web_module.app.test_request_context("/ws/mqtt?apikey=" + API_KEY):
+            assert web_module._validate_ws_auth(FakeSock()) is True
+    finally:
+        _restore_app_state(web_module, old_values, old_svc)
 
 
 @contextmanager

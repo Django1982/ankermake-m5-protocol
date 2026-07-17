@@ -2,6 +2,7 @@ import logging
 import queue as queue_module
 import threading
 import time
+from contextlib import contextmanager
 from types import SimpleNamespace
 
 from web.service.mqtt import MqttQueue, PrintState, EVENT_PRINT_FINISHED
@@ -44,10 +45,14 @@ def _queue():
     queue._nozzle_temp_target = None
     queue._bed_temp = None
     queue._bed_temp_target = None
+    queue._fan_speed = None
     queue._filament_state = "unknown"
     queue._filament_change_value = None
     queue._filament_change_progress = None
     queue._filament_change_step_len = None
+    queue._filament_vendor = None
+    queue._filament_type = None
+    queue._filament_metadata_source = None
     queue._control_username = "tester@example.com"
     queue._control_user_id = "user-123"
     queue._debug_log_payloads = False
@@ -111,6 +116,20 @@ def test_forward_to_ha_accepts_zero_temperature_targets():
     assert {"bed_temp": 60, "bed_temp_target": 0} in ha_updates
 
 
+def test_forward_to_ha_tracks_fan_speed_percent():
+    global ha_updates, history_calls, timelapse_calls, events
+    ha_updates, history_calls, timelapse_calls, events = [], [], [], []
+    queue = _queue()
+
+    queue._forward_to_ha({"commandType": 1005, "value": 0})
+    assert queue.get_state()["telemetry"]["fan_speed"] == 0
+    assert {"fan_speed": 0} in ha_updates
+
+    queue._forward_to_ha({"commandType": 1005, "value": 125})
+    assert queue.get_state()["telemetry"]["fan_speed"] == 100
+    assert {"fan_speed": 100} in ha_updates
+
+
 def test_forward_to_ha_tracks_filament_state_from_material_change_mode():
     global ha_updates, history_calls, timelapse_calls, events
     ha_updates, history_calls, timelapse_calls, events = [], [], [], []
@@ -129,6 +148,88 @@ def test_forward_to_ha_tracks_filament_state_from_material_change_mode():
     assert state["raw_value"] == 0
     assert state["progress"] == 0
     assert state["step_len"] == 0
+
+
+def test_filament_state_includes_gcode_vendor_and_type():
+    global ha_updates, history_calls, timelapse_calls, events
+    ha_updates, history_calls, timelapse_calls, events = [], [], [], []
+    queue = _queue()
+
+    queue.set_gcode_filament_info(vendor="Sunlu", type="PETG")
+    queue.mark_pending_print_start("part_0.2mm_PETG_Anker_M5.gcode")
+    state = queue.get_state()["filament"]
+
+    assert state["material_label"] == "Sunlu PETG"
+    assert state["vendor"] == "Sunlu"
+    assert state["type"] == "PETG"
+    assert state["metadata_source"] == "gcode"
+
+
+def test_filament_state_infers_type_from_filename():
+    global ha_updates, history_calls, timelapse_calls, events
+    ha_updates, history_calls, timelapse_calls, events = [], [], [], []
+    queue = _queue()
+
+    queue.mark_pending_print_start("part_0.2mm_PETG_Anker_M5.gcode")
+    state = queue.get_state()["filament"]
+
+    assert state["material_label"] == "PETG"
+    assert state["vendor"] is None
+    assert state["type"] == "PETG"
+    assert state["metadata_source"] == "filename"
+
+
+def test_mqtt_reconnect_preserves_gcode_filament_metadata():
+    """worker_start() reconnect must not wipe GCode-derived filament info.
+
+    Regression test: a real print showed the correct filament type briefly
+    at print start, then reverted to "unknown" shortly after. Root cause was
+    worker_start() unconditionally calling _reset_print_state() on every MQTT
+    reconnect (e.g. after a transient WiFi hiccup mid-print). Unlike
+    _last_filename/_last_task_id/_state, which self-heal from the next live
+    ct=1000/ct=1001 telemetry, filament vendor/type has no telemetry source —
+    it is a one-shot value pushed from the GCode header at upload time — so
+    wiping it on reconnect loses it for the rest of the print.
+    """
+    global ha_updates, history_calls, timelapse_calls, events
+    ha_updates, history_calls, timelapse_calls, events = [], [], [], []
+    queue = _queue()
+
+    queue.set_gcode_filament_info(vendor="ankerctl-smoketest", type="PETG")
+    queue.mark_pending_print_start("ankerctl_smoketest.gcode")
+    queue._state = PrintState.PRINTING
+
+    # Simulate the reset performed by worker_start() on reconnect.
+    queue._reset_print_state(preserve_filament_metadata=True)
+
+    state = queue.get_state()["filament"]
+    assert state["material_label"] == "ankerctl-smoketest PETG"
+    assert state["vendor"] == "ankerctl-smoketest"
+    assert state["type"] == "PETG"
+    assert state["metadata_source"] == "gcode"
+    # Print-lifecycle fields still reset normally on reconnect.
+    assert queue._state == PrintState.IDLE
+    assert queue._last_filename is None
+
+
+def test_normal_print_state_reset_still_clears_filament_metadata():
+    """A genuine print-lifecycle reset (finish/cancel/abort) must still clear
+    filament info so a subsequent print doesn't inherit stale material data."""
+    global ha_updates, history_calls, timelapse_calls, events
+    ha_updates, history_calls, timelapse_calls, events = [], [], [], []
+    queue = _queue()
+
+    queue.set_gcode_filament_info(vendor="ankerctl-smoketest", type="PETG")
+    queue.mark_pending_print_start("ankerctl_smoketest.gcode")
+    queue._state = PrintState.PRINTING
+
+    queue._reset_print_state()
+
+    state = queue.get_state()["filament"]
+    assert state["material_label"] is None
+    assert state["vendor"] is None
+    assert state["type"] is None
+    assert state["metadata_source"] is None
 
 
 def test_handle_notification_tracks_filament_changing_state():
@@ -481,6 +582,52 @@ def test_deferred_filename_print_start_does_not_crash_when_timelapse_unavailable
 
     assert queue._pending_history_start is False
     assert history_calls == [("start", ("deferred.gcode",), {"task_id": None})]
+
+
+def test_worker_init_survives_ha_service_init_failure(monkeypatch, tmp_path):
+    """If HomeAssistantService raises during construction (e.g. a bad
+    persisted mqtt_port), worker_init() must not raise — self._ha ends up
+    None instead of killing the service thread outright."""
+    import web as web_module
+
+    class FakeConfigManager:
+        def __init__(self, cfg, config_root):
+            self.cfg = cfg
+            self.config_root = config_root
+
+        @contextmanager
+        def open(self):
+            yield self.cfg
+
+    cfg = SimpleNamespace(
+        account=SimpleNamespace(email="tester@example.com", user_id="user-1"),
+        printers=[SimpleNamespace(sn="SN123", name="Printer 1")],
+    )
+    manager = FakeConfigManager(cfg, config_root=tmp_path)
+
+    class RaisingHomeAssistantService:
+        def __init__(self, *args, **kwargs):
+            raise ValueError("invalid literal for int() with base 10: 'not-a-number'")
+
+    monkeypatch.setattr("web.service.mqtt.AppriseNotifier", lambda *a, **kw: SimpleNamespace())
+    monkeypatch.setattr("web.service.mqtt.PrintHistory", lambda *a, **kw: SimpleNamespace())
+    monkeypatch.setattr("web.service.mqtt.TimelapseService", lambda *a, **kw: SimpleNamespace())
+    monkeypatch.setattr("web.service.mqtt.HomeAssistantService", RaisingHomeAssistantService)
+
+    old_config = web_module.app.config.get("config")
+    web_module.app.config["config"] = manager
+
+    queue = object.__new__(MqttQueue)
+    queue.printer_index = 0
+    queue._state_lock = threading.RLock()
+    queue._print_state_event = threading.Event()
+
+    try:
+        queue.worker_init()
+    finally:
+        web_module.app.config["config"] = old_config
+
+    assert queue._ha is None
 
 
 def test_handle_notification_aborts_active_print_on_value_8(monkeypatch):
@@ -1957,3 +2104,28 @@ def test_handle_notification_print_finished_does_not_block_on_slow_notifier(monk
     assert elapsed < 0.2
     release.set()
     queue._notification_queue.join()
+
+
+def test_worker_stop_notifies_timelapse():
+    global ha_updates, history_calls, timelapse_calls, events
+    ha_updates, history_calls, timelapse_calls, events = [], [], [], []
+    queue = _queue()
+
+    calls = []
+    queue._timelapse = SimpleNamespace(handle_mqtt_service_stopped=lambda: calls.append(True))
+    queue._ha = SimpleNamespace(update_state=lambda **kwargs: None, stop=lambda: None)
+
+    queue.worker_stop()
+
+    assert calls == [True]
+
+
+def test_worker_stop_without_timelapse_service():
+    global ha_updates, history_calls, timelapse_calls, events
+    ha_updates, history_calls, timelapse_calls, events = [], [], [], []
+    queue = _queue()
+
+    queue._timelapse = None
+    queue._ha = SimpleNamespace(update_state=lambda **kwargs: None, stop=lambda: None)
+
+    queue.worker_stop()
