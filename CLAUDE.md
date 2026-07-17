@@ -91,6 +91,7 @@ make install-tools
 
 # MQTT commands
 ./ankerctl.py mqtt monitor                    # Monitor real-time MQTT events
+                                              # --command-topics / --sniff-topics  also subscribe to app->printer topics
 ./ankerctl.py mqtt gcode                      # Interactive GCode prompt
 ./ankerctl.py mqtt rename-printer NAME        # Set printer nickname
 ./ankerctl.py mqtt send <CMD_TYPE> [key=val]  # Send raw MQTT command (expert use)
@@ -98,6 +99,8 @@ make install-tools
 ./ankerctl.py mqtt gcode-dump GCODE           # Send GCode, collect full ring-buffer output
                                               # --window SECS  collect window (default 3.0)
                                               # --drain N       send N M114 drain probes after main response
+./ankerctl.py mqtt file-list-probe            # Discovery tool for storage file-list cmd (0x03f1)
+                                              # --source onboard|usb  --value N  --timeout SECS  --window SECS
 
 # PPPP commands
 ./ankerctl.py pppp lan-search                          # Find printers on local network
@@ -114,10 +117,11 @@ make install-tools
 ./ankerctl.py webserver run                  # Start web UI
 
 # Global options
-./ankerctl.py -p INDEX ...          # Select printer by index (0-based)
-./ankerctl.py -k ...                # Disable TLS verification (insecure)
-./ankerctl.py -v/-q ...             # Increase/decrease verbosity
-./ankerctl.py --pppp-dump FILE ...  # Enable PPPP packet capture
+./ankerctl.py -p INDEX ...              # Select printer by index (0-based); env PRINTER_INDEX
+./ankerctl.py -k ...                    # Disable TLS verification (insecure)
+./ankerctl.py -v/-q ...                 # Increase/decrease verbosity
+./ankerctl.py --pppp-dump FILE ...      # Enable PPPP packet capture
+./ankerctl.py --mqtt-ca-cert PATH ...   # CA cert for local MQTT broker TLS verification; env ANKERCTL_MQTT_CA_CERT
 ```
 
 ### Smoke Tests
@@ -151,7 +155,20 @@ make install-tools
 
 ## Testing Guidelines
 
-**There is no automated test suite in this repository.**
+**There is an automated pytest suite in `tests/`.** Run it with:
+
+```bash
+python3 -m pytest tests/ -q
+```
+
+As of this writing that collects 519 passed, 15 skipped across ~30 files (`conftest.py` +
+`test_*.py`). The exact count will drift as the suite grows — re-run the command rather than
+trusting this number. Skips are environment-gated (e.g. platform-specific paths); a growing
+skip count on a machine that should support those paths is worth investigating.
+
+`pytest` is pinned in `requirements-dev.txt` (`pip install -r requirements-dev.txt`). There is
+no CI-enforced coverage threshold — check `tests/conftest.py` for fixtures and mocking patterns
+before adding new tests, and follow the existing `test_<module>.py` naming convention.
 
 ### Manual Validation
 
@@ -185,21 +202,29 @@ python examples/probe_pppp_cmds.py   # Probe undocumented PPPP commands
 
 ```bash
 # --- Server ---
-PRINTER_INDEX          # Select printer (default: 0)
+PRINTER_INDEX          # Select/lock active printer (default: 0). When set, also locks the
+                       # web UI printer selector (POST /api/printers/active returns 403)
 FLASK_HOST             # Web server host (default: 127.0.0.1)
 FLASK_PORT             # Web server port (default: 4470)
-FLASK_SECRET_KEY       # Session cookie secret (auto-generated if unset; set for persistence)
-UPLOAD_MAX_MB          # Max file upload size in MB (default: 512)
+FLASK_SECRET_KEY       # Session cookie secret (auto-generated if unset; set for persistence).
+                       # If unset, a random key is generated once and persisted to
+                       # <config_root>/flask_secret.key so it survives restarts.
+UPLOAD_MAX_MB                # Max file upload size in MB (default: 512)
+UPLOAD_MAX_FORM_MEMORY_KB    # Max in-memory form size in KB (default: 512)
+UPLOAD_MAX_FORM_PARTS        # Max multipart form parts (default: 20)
 
 # --- Security ---
 ANKERCTL_API_KEY       # API key for write-operation auth (unset = no auth)
                        # Takes precedence over key stored in config file
+ANKERCTL_MQTT_CA_CERT  # CA cert path for local MQTT broker TLS verification (same as --mqtt-ca-cert)
 
 # --- Feature Flags ---
 ANKERCTL_DEV_MODE=true   # Enable Debug tab and /api/debug/* endpoints (dev only)
 ANKERCTL_LOG_DIR         # Directory for log files; enables file logging when set
                          # Default in CLI: /logs if /logs exists, else None
                          # Default in debug API: /logs
+ANKERCTL_CONSOLE_BUFFER_LINES        # In-memory console log ring buffer size, GET /api/console/logs (default: 2000)
+ANKERCTL_PRINTER_ALERT_BUFFER_SIZE   # In-memory printer alert ring buffer size, GET /api/printer/alerts (default: 100)
 
 # --- Upload Rate ---
 UPLOAD_RATE_MBPS       # Upload speed to printer in Mbit/s (choices: 5, 10, 25, 50, 100)
@@ -239,6 +264,7 @@ TIMELAPSE_CAPTURES_DIR=/captures  # Directory for timelapse video storage
 TIMELAPSE_LIGHT                # Light control mode: 'snapshot' | 'session' | unset
                                # 'snapshot': light on, wait 1.5s, shoot, wait 1s, light off
                                # 'session': light on at capture start, off at finish
+TIMELAPSE_CAMERA_SOURCE=follow # Which camera source feeds the timelapse capture (default: follow active camera)
 
 # --- Home Assistant MQTT Discovery ---
 HA_MQTT_ENABLED=false          # Enable HA MQTT Discovery integration
@@ -250,23 +276,53 @@ HA_MQTT_DISCOVERY_PREFIX=homeassistant  # HA discovery prefix
 HA_MQTT_TOPIC_PREFIX=ankerctl  # State/command topic prefix
 HA_BASE_URL=http://homeassistant.local:8123  # HA REST API base URL for MJPEG camera auto-registration
 HA_TOKEN=<long-lived-token>                  # HA long-lived access token (Profile → Long-Lived Access Tokens)
+
+# --- Filament Service (swap wizard / quick extrude-retract defaults, all optional) ---
+# All of these are also stored per-config (not just env) and editable at
+# Filaments tab -> Filament Service, or via GET/POST /api/settings/filament-service.
+FILAMENT_ALLOW_LEGACY_SWAP=false          # Default state of the "guided automatic swap" toggle
+FILAMENT_MANUAL_SWAP_PREHEAT_TEMP_C=180   # Default manual-swap preheat temp
+FILAMENT_QUICK_MOVE_LENGTH_MM=40          # Default quick extrude/retract length
+FILAMENT_SWAP_PRIME_LENGTH_MM=10          # Default prime length before unload
+FILAMENT_SWAP_UNLOAD_LENGTH_MM=40         # Default unload length
+FILAMENT_SWAP_LOAD_LENGTH_MM=120          # Default load length
+FILAMENT_SWAP_HOME_PAUSE_S=70             # Pause after Home-All before Z-lift/park move
+                                          # (legacy alias: FILAMENT_SWAP_HOME_SETTLE_S)
+
+# Advanced swap-wizard timing/thresholds (module-level constants in web/__init__.py;
+# also overridable via the local JSON file exposed at
+# GET/POST /api/settings/filament-service/advanced[/open]):
+FILAMENT_SWAP_HOME_READY_TEMP_C=180       # Min nozzle temp considered "ready" before homing move
+FILAMENT_SWAP_COOLDOWN_DELAY_S=0.75       # Delay before issuing cooldown after swap/cancel
+FILAMENT_SWAP_MOTION_SETTLE_S=1.0         # Settle time after a motion command before the next step
+FILAMENT_SWAP_PARK_MIN_TRAVEL_MM=250.0    # Minimum XY travel considered a valid park move
+FILAMENT_SERVICE_TARGET_ACK_TIMEOUT_S=3.0 # Timeout waiting for MQTT ack of a target-temp command
+FILAMENT_SERVICE_TEMP_MAX_AGE_S=15.0      # Max age of a cached temperature reading before re-polling
 ```
 
 ## Web API Reference
 
-All endpoints are served by `web/__init__.py`. Authentication is enforced by the
-`_check_api_key()` before-request middleware when `ANKERCTL_API_KEY` is set.
+All endpoints are served by `web/__init__.py` (~90 HTTP routes + 5 WebSocket routes as of this
+writing — re-grep `web/__init__.py` for `@app\.(get|post|put|delete)` / `@sock\.route` rather
+than trusting a hardcoded count, since this list changes often). Authentication is enforced by
+the `_check_api_key()` before-request middleware when `ANKERCTL_API_KEY` (or a config-file key)
+is set.
+
+**Multi-printer routing:** almost every endpoint below accepts an optional `?printer_index=N`
+query parameter (resolved by `_requested_printer_index()`) that scopes the request to a specific
+configured printer, independent of whichever printer is globally "active" in the navbar. Always
+prefer this over assuming the active printer — several past bugs (see project memory / CHANGELOG)
+came from endpoints silently falling back to the global active index instead of the requested one.
 
 ### Authentication Rules
 
-- **GET requests** are unauthenticated by default (read-only).
-- **POST / DELETE requests** always require auth (session cookie, `X-Api-Key` header, or `?apikey=` param).
-- **Protected GET paths** (listed in `_PROTECTED_GET_PATHS`) also require auth:
-  `/api/ankerctl/server/reload`, `/api/debug/state`, `/api/debug/logs`, `/api/debug/services`,
-  `/api/settings/mqtt`, `/api/notifications/settings`.
-- **All `/api/debug/*` paths** require auth (prefix match in middleware).
-- **Setup paths** (`/api/ankerctl/config/upload`, `/api/ankerctl/config/login`) are exempt
-  from auth when no printer is configured yet.
+- **GET/HEAD/OPTIONS requests** are unauthenticated by default (read-only).
+- **POST / PUT / DELETE requests** always require auth (session cookie, `X-Api-Key` header, or `?apikey=` param) once a key is configured. There is no setup-time exemption anymore — if a key is already configured, even the setup endpoints (`/api/ankerctl/config/upload`, `/api/ankerctl/config/login`) require it. If no key is configured at all, everything is open (backwards compatible).
+- **Protected GET paths** (exact-match set `_PROTECTED_GET_PATHS` in `web/__init__.py`) also require auth. As of this writing that set includes: `/api/ankerctl/server/reload`, `/api/console/logs`, `/api/debug/state`, `/api/debug/logs`, `/api/debug/services`, `/api/camera/frame`, `/api/camera/stream`, `/api/snapshot`, `/api/settings/mqtt`, `/api/settings/filament-service`, `/api/settings/filament-service/advanced`, `/api/settings/timelapse`, `/api/notifications/settings`, `/api/printers`, `/api/settings/camera`, `/api/printer/bed-leveling`, `/api/printer/bed-leveling/last`, `/api/printer/settings-summary`, `/api/printer/z-offset`, `/api/filaments`, `/api/filaments/service/swap`, `/api/history`, `/api/timelapses`, `/api/timelapse-snapshots`, `/api/printer/runtime-state`, `/api/files/printer/thumbnail`. **This list changes often — grep `_PROTECTED_GET_PATHS` in `web/__init__.py` for the current set rather than trusting this snapshot.**
+- **All `/api/debug/*` paths** require auth (prefix match), regardless of method.
+- **All `/api/timelapse/*` and `/api/timelapse-snapshot/*` paths** require auth (prefix match) **for every method, including GET** — downloading a timelapse video or snapshot is not anonymous when a key is configured.
+- **`/api/history/<id>/thumbnail`** requires auth (suffix/prefix match) because it proxies the same outbound preview-image fetch as `/api/files/printer/thumbnail`.
+- **All WebSocket routes** (`/ws/*`) enforce auth inline via `_validate_ws_auth()` when a key is configured — Flask's `before_request` does not gate WebSocket upgrade requests, so every `@sock.route` handler checks explicitly. This applies to all five WS routes, not just `/ws/ctrl`.
 
 ### General Endpoints
 
@@ -275,36 +331,74 @@ All endpoints are served by `web/__init__.py`. Authentication is enforced by the
 | `GET` | `/` | No | Render main UI page |
 | `GET` | `/api/health` | No | Liveness probe — always returns `{"status": "ok"}` |
 | `GET` | `/api/version` | No | OctoPrint-compatible version info |
-| `GET` | `/video` | No | Raw H.264 video stream (use `?for_timelapse=1` for timelapse client) |
+| `GET` | `/video` | No | Raw H.264 video stream (use `?for_timelapse=1` to bypass the `video_enabled` gate for the local timelapse client) |
+| `GET` | `/api/console/logs` | Yes | In-memory rolling console log buffer; `?limit=` (default 200, max 1000), `?after=` (id cursor); size set by `ANKERCTL_CONSOLE_BUFFER_LINES` |
 
 ### Configuration Endpoints
 
 | Method | Path | Auth Required | Description |
 |--------|------|--------------|-------------|
-| `POST` | `/api/ankerctl/config/upload` | Setup-exempt | Upload `login.json` file |
-| `POST` | `/api/ankerctl/config/login` | Setup-exempt | Email/password login |
+| `POST` | `/api/ankerctl/config/upload` | Yes | Upload `login.json` file. No special setup-time exemption (see Authentication Rules) — required whenever a key is configured, even before any printer is set up. |
+| `POST` | `/api/ankerctl/config/import-slicer` | Yes | Auto-detect and import the local slicer/eufyMake Studio login cache |
+| `POST` | `/api/ankerctl/config/login` | Yes | Email/password login (incl. CAPTCHA flow) |
 | `GET` | `/api/ankerctl/server/reload` | Yes | Reload config + restart all services |
 | `POST` | `/api/ankerctl/config/upload-rate` | Yes | Set upload rate; form field `upload_rate_mbps` (choices: 5, 10, 25, 50, 100) |
+
+### Printer Selection Endpoints
+
+| Method | Path | Auth Required | Description |
+|--------|------|--------------|-------------|
+| `GET` | `/api/printers` | Yes | List configured printers + `active_index` + `locked` flag |
+| `POST` | `/api/printers/lan-search` | Yes | Broadcast LAN search, persist matching printer IPs, return discovery results |
+| `POST` | `/api/printers/active` | Yes | Switch active printer; JSON body `{"index": N}`. Returns 403 if `PRINTER_INDEX` env var is set (locked) or the target printer's model is in `UNSUPPORTED_PRINTERS`; 400 if index is out of range. **Not** blocked by an in-progress print — per-printer MQTT/video/PPPP services stay attached to their own printer index, so switching the active/UI printer does not interrupt a running print or its timelapse. |
+
+### Files / Slicer Integration Endpoints
+
+| Method | Path | Auth Required | Description |
+|--------|------|--------------|-------------|
+| `POST` | `/api/files/local` | Yes | OctoPrint-compatible upload; form fields `file` (GCode), `print` (bool). Upload-only requests are allowed while printing; requests that would start a new print return 409 if a print is already active/pending. |
+| `GET` | `/api/files/printer` | No | Browse files on printer/USB storage; `?source=onboard\|usb`, `?value=` (raw storage-source int, overrides `source`) |
+| `GET` | `/api/files/printer/thumbnail` | Yes | Proxy a stored file's thumbnail; `?path=`, `?source=` |
+| `POST` | `/api/files/printer/print` | Yes | Start a print from a file already on printer/USB storage |
 
 ### Printer Control Endpoints
 
 | Method | Path | Auth Required | Description |
 |--------|------|--------------|-------------|
-| `POST` | `/api/printer/gcode` | Yes | Send GCode; JSON body `{"gcode": "G28"}`. Motion commands blocked while printing (returns 409). |
-| `POST` | `/api/printer/control` | Yes | Print state control; JSON body `{"value": N}` — see Print Control Values below |
-| `POST` | `/api/printer/autolevel` | Yes | Start auto-leveling (G29); blocked while printing |
-| `GET` | `/api/printer/bed-leveling` | No | Read 7×7 bed level grid via M420 V (takes ~15s) |
-| `GET` | `/api/printer/bed-leveling/last` | No | Return most recently saved bed level grid from log dir |
-| `GET` | `/api/snapshot` | No | Capture a JPEG snapshot via ffmpeg from `/video`; returns file download |
+| `POST` | `/api/printer/gcode` | Yes | Send GCode; JSON body `{"gcode": "G28"}`. Motion/mesh-disabling commands (`G0/G1/G2/G3/G28/G29/G90/G91/G92/M18/M84`, `M420 S0`) blocked while printing (409). |
+| `POST` | `/api/printer/home` | Yes | Home an axis; JSON body `{"axis": "all"\|"xy"\|"z"}`; blocked while printing (409) |
+| `POST` | `/api/printer/control` | Yes | Print state control; JSON body `{"value": N}` — see Print Control Values below. `value=0` (restart) additionally 409s if there is no active/pending print to restart. |
+| `POST` | `/api/printer/autolevel` | Yes | Start auto-leveling (G29); blocked while printing (409) |
+| `POST` | `/api/mqtt/reconnect` | Yes | Cancel the MQTT reconnect back-off and attempt to reconnect immediately |
+| `GET` | `/api/printer/z-offset` | Yes | Current Z-offset state; auto-refreshes via a live MQTT read if the cached value is stale |
+| `POST` | `/api/printer/z-offset/refresh` | Yes | Force a live Z-offset read via MQTT (ct=1021) |
+| `POST` | `/api/printer/z-offset` | Yes | Set absolute Z-offset; JSON body `{"target_mm": N}`. Clamped to ±2.0mm (`Z_OFFSET_MIN_MM`/`_MAX_MM` — no documented safe range exists from Anker, this is a conservative bound chosen to prevent bed crashes) |
+| `POST` | `/api/printer/z-offset/nudge` | Yes | Relative Z-offset adjustment; JSON body `{"delta_mm": N}`; same ±2.0mm clamp |
+| `GET` | `/api/printer/bed-leveling` | Yes | Read 7×7 bed level grid via M420 V (takes ~15s); blocked while printing (409) |
+| `GET` | `/api/printer/settings-summary` | Yes | Dump of misc. printer settings (best-effort GCode queries); blocked while printing (409) |
+| `GET` | `/api/printer/runtime-state` | Yes | Consolidated live state payload (used by the timelapse-current-print controls) |
+| `GET` | `/api/printer/alerts` | No | Polled in-memory alert ring buffer; `?limit=` (default 20), `?after=` (id cursor); size set by `ANKERCTL_PRINTER_ALERT_BUFFER_SIZE` |
+| `GET` | `/api/printer/bed-leveling/last` | Yes | Most recently saved `.bed` grid from `ANKERCTL_LOG_DIR/bed_leveling/` |
+| `GET` | `/api/snapshot` | Yes | Capture a JPEG snapshot via ffmpeg from the active camera; also archives to timelapse manual snapshots; returns file download |
 
-**Print Control Values (empirically verified, ZZ_MQTT_CMD_PRINT_CONTROL):**
+**Print Control Values (ZZ_MQTT_CMD_PRINT_CONTROL, empirically verified):**
 
 | Value | Action |
 |-------|--------|
 | `2` | Pause print |
 | `3` | Resume paused print |
 | `4` | Stop/cancel print |
-| `0` | Restart print from beginning |
+| `0` | Restart print from beginning (409 if nothing is printing/pending) |
+
+### Camera Endpoints
+
+| Method | Path | Auth Required | Description |
+|--------|------|--------------|-------------|
+| `GET` | `/api/settings/camera` | Yes | Resolve camera config + effective stream/snapshot source for the requested printer |
+| `POST` | `/api/settings/camera` | Yes | Update per-printer camera settings (source, external URL, etc.); URLs validated against an `http`/`https`/`rtsp`/`rtmp` allowlist |
+| `POST` | `/api/settings/launcher-bat` | Yes | Generate a downloadable Windows launcher `.bat`; JSON body `{"install_dir": "..."}` |
+| `GET` | `/api/camera/frame` | Yes | Single JPEG frame via ffmpeg from the selected camera source |
+| `GET` | `/api/camera/stream` | Yes | Persistent MJPEG multipart preview stream; `?fps=`, `?quality=`, `?source=` |
 
 ### Notification Endpoints
 
@@ -318,59 +412,70 @@ All endpoints are served by `web/__init__.py`. Authentication is enforced by the
 
 | Method | Path | Auth Required | Description |
 |--------|------|--------------|-------------|
-| `GET` | `/api/settings/timelapse` | No | Return current timelapse config |
+| `GET` | `/api/settings/timelapse` | Yes | Return current per-printer timelapse config |
 | `POST` | `/api/settings/timelapse` | Yes | Update timelapse config; JSON body `{"timelapse": {...}}`; auto-reloads service |
 | `GET` | `/api/settings/mqtt` | Yes | Return current Home Assistant MQTT config (contains broker password) |
 | `POST` | `/api/settings/mqtt` | Yes | Update HA MQTT config; JSON body `{"home_assistant": {...}}`; auto-reloads service |
+| `GET` | `/api/settings/filament-service` | Yes | Filament Service tuning config, including the per-printer `all_metal_hotend` flag (see Filament Profiles feature note) |
+| `POST` | `/api/settings/filament-service` | Yes | Update Filament Service tuning config, including `all_metal_hotend` |
+| `GET` | `/api/settings/filament-service/advanced` | Yes | Read advanced local JSON filament-swap GCode command overrides (creates the file with defaults on first read) |
+| `POST` | `/api/settings/filament-service/advanced/open` | Yes | Open the advanced config file with the OS's default application (`os.startfile` on Windows, `xdg-open`/`open` elsewhere) so a local operator can hand-edit it. Path is server-fixed (not user-supplied), so this is a local-editing convenience, not an arbitrary-file-open vector — but it does mean a POST to this route spawns a GUI application on the host, which only makes sense for a local single-user deployment. |
 
 ### Print History Endpoints
 
 | Method | Path | Auth Required | Description |
 |--------|------|--------------|-------------|
-| `GET` | `/api/history` | No | List history entries; query params: `limit=` (default 50), `offset=` (default 0). Returns `{"entries": [...], "total": N}` |
-| `DELETE` | `/api/history` | Yes | Clear all history entries |
-
-### Timelapse Endpoints
-
-| Method | Path | Auth Required | Description |
-|--------|------|--------------|-------------|
-| `GET` | `/api/timelapses` | No | List videos; returns `{"videos": [{filename, size_bytes, created_at}], "enabled": bool}` |
-| `GET` | `/api/timelapse/<filename>` | No | Download a video file (MP4) |
-| `DELETE` | `/api/timelapse/<filename>` | Yes | Delete a video |
+| `GET` | `/api/history` | Yes | Paginated history; `?limit=` (default 50, max 500), `?offset=`, `?filter=active\|all\|<printer_index>` (default `active`). Returns `{"entries": [...], "total": N}` |
+| `DELETE` | `/api/history` | Yes | Clear history within the `?filter=` scope; 409 if an entry in scope is still in progress |
+| `POST` | `/api/history/delete` | Yes | Bulk-delete by id list; JSON body `{"ids": [...]}`; blocks deleting an in-progress entry |
+| `GET` | `/api/history/<id>/thumbnail` | Yes | Entry thumbnail (local archive or proxied `preview_url`) |
+| `POST` | `/api/history/<id>/reprint` | Yes | Re-upload the archived GCode for a history entry and start a print |
 
 ### Filament Profile Endpoints
 
 | Method | Path | Auth Required | Description |
 |--------|------|--------------|-------------|
-| `GET` | `/api/filaments` | No | List all filament profiles |
+| `GET` | `/api/filaments` | Yes | List all filament profiles |
 | `POST` | `/api/filaments` | Yes | Create a profile; JSON body with profile fields |
 | `PUT` | `/api/filaments/<id>` | Yes | Update a profile; JSON body with fields to change |
 | `DELETE` | `/api/filaments/<id>` | Yes | Delete a profile |
-| `POST` | `/api/filaments/<id>/apply` | Yes | Send M104/M140 to printer with profile temperatures |
+| `POST` | `/api/filaments/<id>/apply` | Yes | Send M104/M140 to printer with profile temperatures; nozzle target clamped to the active hotend's max (see Filament Profiles feature note) |
 | `POST` | `/api/filaments/<id>/duplicate` | Yes | Duplicate profile (appends " (copy)" to name) |
+| `GET` | `/api/filaments/service/swap` | Yes | Current filament-swap-wizard state for the requested printer |
+| `POST` | `/api/filaments/service/preheat` | Yes | Preheat nozzle to a profile's temperature; JSON body `{"profile_id": N}` |
+| `POST` | `/api/filaments/service/move` | Yes | Quick extrude/retract move with auto-heat-wait |
+| `POST` | `/api/filaments/service/swap/start` | Yes | Begin a guided (automatic) or manual filament swap; 409 if a swap is already in progress |
+| `POST` | `/api/filaments/service/swap/confirm` | Yes | Advance the swap to its load/purge phase; requires a matching swap token |
+| `POST` | `/api/filaments/service/swap/cancel` | Yes | Abort the in-progress swap and cool the nozzle |
 
-### Printer Selector Endpoints
+### Timelapse Endpoints
 
 | Method | Path | Auth Required | Description |
 |--------|------|--------------|-------------|
-| `GET` | `/api/printers` | No | List configured printers + `active_index` + `locked` flag |
-| `POST` | `/api/printers/active` | Yes | Switch active printer; JSON body `{"index": N}`; blocked during print (409) or when `PRINTER_INDEX` env var is set (403) |
-
-### Slicer Integration Endpoint
-
-| Method | Path | Auth Required | Description |
-|--------|------|--------------|-------------|
-| `POST` | `/api/files/local` | Yes | OctoPrint-compatible file upload; form fields: `file` (GCode), `print` (bool) |
+| `GET` | `/api/timelapses` | Yes | List assembled MP4 videos; returns `{"videos": [{filename, size_bytes, created_at}], "enabled": bool}` |
+| `GET` | `/api/timelapse-snapshots` | Yes | List manual/timelapse snapshot collections |
+| `POST` | `/api/timelapse/current/start` | Yes | Start timelapse capture for the print currently in progress |
+| `POST` | `/api/timelapse/current/dismiss` | Yes | Dismiss the "start timelapse?" offer for the current print |
+| `POST` | `/api/timelapse/current/pause` | Yes | Pause timelapse capture for the current print |
+| `POST` | `/api/timelapse/current/resume` | Yes | Resume a paused capture for the current print |
+| `POST` | `/api/timelapse/current/stop` | Yes | Stop and finalize capture for the current print |
+| `GET` | `/api/timelapse/<filename>` | Yes | Download a video file (MP4) — auth required for GET too, see Authentication Rules |
+| `DELETE` | `/api/timelapse/<filename>` | Yes | Delete a video |
+| `GET` | `/api/timelapse-snapshot/<collection>/<filename>` | Yes | Download/preview a single snapshot JPEG |
+| `DELETE` | `/api/timelapse-snapshot/<collection>` | Yes | Delete an entire snapshot collection (or discard a resumable pause) |
+| `DELETE` | `/api/timelapse-snapshot/<collection>/<filename>` | Yes | Delete a single snapshot JPEG |
 
 ### WebSocket Endpoints
 
 | Path | Direction | Description |
 |------|-----------|-------------|
 | `/ws/mqtt` | Server → Client | Raw MQTT message stream (JSON objects from MqttQueue) |
-| `/ws/video` | Server → Client | Raw H.264 video frame stream |
-| `/ws/pppp-state` | Server → Client | PPPP connection status (`{"status": "connected"}` / `{"status": "disconnected"}`) |
+| `/ws/video` | Server → Client | Raw H.264 video frame stream; ref-counts viewer connect/disconnect |
+| `/ws/pppp-state` | Server → Client | PPPP connection status (`{"status": "dormant"\|"connected"\|"disconnected", "source": "service"\|"probe"\|"none"}`) |
 | `/ws/upload` | Server → Client | File upload progress events from FileTransferService |
-| `/ws/ctrl` | Bidirectional | Light control (`{"light": bool}`), video quality (`{"video_profile": "sd"\|"hd"}`), video enable/disable (`{"video_enabled": bool}`). Requires auth when `ANKERCTL_API_KEY` is set (inline check — `before_request` does not run for WebSocket routes). |
+| `/ws/ctrl` | Bidirectional | Light control (`{"light": bool}`), video quality (`{"video_profile": "sd"\|"hd"\|"fhd"}`), video enable/disable (`{"video_enabled": bool}`) |
+
+All five routes enforce auth inline via `_validate_ws_auth()` when `ANKERCTL_API_KEY` is set — see Authentication Rules above.
 
 ### Debug Endpoints (ANKERCTL_DEV_MODE=true only)
 
@@ -378,12 +483,14 @@ All endpoints are served by `web/__init__.py`. Authentication is enforced by the
 |--------|------|--------------|-------------|
 | `GET` | `/api/debug/state` | Yes | MqttQueue internal state JSON |
 | `POST` | `/api/debug/config` | Yes | Set debug logging; JSON body `{"debug_logging": bool}` |
-| `POST` | `/api/debug/simulate` | Yes | Fire simulated event; JSON body `{"type": "...", "payload": {...}}` |
+| `POST` | `/api/debug/simulate` | Yes | Fire simulated event; JSON body `{"type": "...", "payload": {...}}`; 409 if a real print is currently in progress |
 | `GET` | `/api/debug/services` | Yes | Service health summary (state, refs, type) |
 | `POST` | `/api/debug/services/<name>/restart` | Yes | Restart a named service asynchronously |
+| `POST` | `/api/debug/services/<name>/test` | Yes | Run a PPPP connectivity probe for a `pppp:<idx>` service |
 | `GET` | `/api/debug/logs` | Yes | List log files in `ANKERCTL_LOG_DIR` |
 | `GET` | `/api/debug/logs/<filename>` | Yes | Tail log file; query param `?lines=N` (default 500) |
-| `GET` | `/api/debug/bed-leveling` | Yes | Same as `/api/printer/bed-leveling` (debug alias) |
+| `GET` | `/api/debug/bed-leveling` | Yes | Same as `/api/printer/bed-leveling` (debug alias); blocked while printing (409) |
+| `GET` | `/api/debug/printer-report/<name>` | Yes | Read a named printer diagnostic report; blocked while printing (409) |
 
 **Simulation event types** (`POST /api/debug/simulate`):
 
@@ -403,18 +510,57 @@ All services are registered in `register_services()` in `web/__init__.py` and ma
 `ServiceManager` (in `web/lib/service.py`). Always access services via `app.svc.borrow("name")`.
 See `.claude/agent-memory/INDEX.md` → "Key Classes Summary" for per-service method and attribute listings.
 
+**Per-printer service instances:** `MqttQueue`, `PPPPService`, and `VideoQueue` are instantiated
+**once per supported printer**, not as global singletons. `register_services()` computes the set
+of supported printer indexes from the config on every reload/printer-switch and registers/starts
+one instance per index, named with an index suffix:
+
+| Service class | Registered name | Registered for |
+|---|---|---|
+| `MqttQueue` | `mqttqueue:<printer_index>` | Every printer whose model is not in `UNSUPPORTED_PRINTERS` |
+| `PPPPService` | `pppp:<printer_index>` | Every camera-supported printer (i.e. not in `PRINTERS_WITHOUT_CAMERA`) |
+| `VideoQueue` | `videoqueue:<printer_index>` | Every camera-supported printer |
+| `FileTransferService` | `filetransfer` | Singleton (one shared upload pipeline for all printers) |
+
+A handful of unqualified legacy names (`"mqttqueue"`, `"pppp"`, `"videoqueue"`) are still
+recognized as fallback aliases for printer index 0 in a few lookup helpers, but new code should
+resolve the indexed name via `mqtt_service_name(idx)` / `pppp_service_name(idx)` /
+`video_service_name(idx)` (all defined near the top of `web/__init__.py`) rather than hardcoding
+the bare name. Route handlers resolve `printer_index` per-request via `_requested_printer_index()`
+(honors `?printer_index=`, falls back to the globally active printer) — see "Multi-printer
+routing" in the Web API Reference.
+
+Switching the active printer (`POST /api/printers/active`) or reloading config
+(`GET /api/ankerctl/server/reload`) calls `register_services()` again, which registers newly
+supported printers, unregisters printers that dropped out of config, and leaves already-running
+per-printer services alone (so an in-progress print/timelapse on a non-active printer is not
+interrupted by switching the UI to a different printer).
+
+**Unsupported-device guard:** models listed in `UNSUPPORTED_PRINTERS` (e.g. the eufyMake E1 UV
+printer, model `V8260`) never get a `MqttQueue`/`PPPPService`/`VideoQueue` registered, and all
+`/api/printer/*`, `/api/files/*`, `/api/filaments*` requests scoped to that printer index are
+rejected with 503 by the `_block_unsupported_device` before-request hook — this runs before auth,
+so the block applies even to unauthenticated requests.
+
 ### MqttQueue (`web/service/mqtt.py`)
 
-Core service that drives the entire application. Registered as `"mqttqueue"`.
+Core service that drives print state for one printer. One instance per supported printer index
+(constructor takes `printer_index`); registered as `mqttqueue:<printer_index>`.
 
 **Lifecycle:** `worker_init()` creates sub-services (PrintHistory, TimelapseService,
 HomeAssistantService). `worker_start()` opens the MQTT connection. `worker_run()` polls
 for messages every 100ms.
 
-**Key public methods:** `send_gcode(gcode)`, `send_print_control(value)`, `send_auto_leveling()`,
-`set_gcode_layer_count(count)`, `simulate_event(type, payload)`, `set_debug_logging(enabled)`, `get_state()`.
+**Key public methods:** `send_gcode(gcode)`, `send_home(axis)`, `send_print_control(value)`,
+`send_auto_leveling()`, `start_stored_file(...)`, `get_z_offset_state()` / `refresh_z_offset()` /
+`wait_for_z_offset_target()`, `mark_pending_print_start(...)`, `get_stored_file_preview_url(...)`,
+`start_timelapse_for_current_print()` / `pause_.../resume_.../stop_.../dismiss_timelapse_start_offer()`,
+`set_gcode_layer_count(count)`, `simulate_event(type, payload)`, `set_debug_logging(enabled)`,
+`get_state()`, `reset_reconnect_backoff()`.
 
-**Properties:** `is_printing` (bool), `history` (PrintHistory), `timelapse` (TimelapseService), `ha` (HomeAssistantService).
+**Properties:** `is_printing` (bool), `is_preparing_print` (bool), `has_pending_print_start` (bool),
+`history` (PrintHistory), `timelapse` (TimelapseService), `ha` (HomeAssistantService),
+`last_message_time`, `nozzle_temp` / `nozzle_temp_target`, `z_offset_mm`.
 
 **MQTT state machine (ct=1000):**
 
@@ -429,29 +575,51 @@ for messages every 100ms.
 
 **Layer count:** ct=1052 provides `real_print_layer` and `total_layer`. If `_gcode_layer_count` is set (from GCode header), `total_layer` is overridden before forwarding to WebSocket.
 
+**Nozzle temperature ceiling:** `_hotend_nozzle_max_c()` (module-level helper in `web/__init__.py`,
+not on `MqttQueue` itself) resolves the effective max nozzle temperature per printer — see the
+All-Metal Hotend note under Filament Profiles below. All server-side code paths that set a nozzle
+target (GCode send, filament-profile apply, Filament Service preheat/manual-swap) clamp through
+this helper rather than trusting the caller-supplied value.
+
 ### PPPPService (`web/service/pppp.py`)
 
-Manages the LAN (PPPP) connection. Registered as `"pppp"`. Reference-counted: started when first
-`borrow()`ed. Key: `connected` (bool), `api_command(commandType, **kwargs)`.
+Manages the LAN (PPPP) connection for one printer. One instance per camera-supported printer index
+(constructor takes `printer_index`); registered as `pppp:<printer_index>`. Reference-counted:
+started when first `borrow()`ed. Key: `connected` (bool), `api_command(commandType, **kwargs)`,
+`await_connected()`. The module also exposes a `reserve_session(printer_index)` context manager
+(not a method on the class) that `FileTransferService` uses to exclusively stop/restart this
+service for the duration of a GCode upload, so the upload doesn't race the printer's single PPPP
+session slot against an active video/timelapse session.
 
 ### VideoQueue (`web/service/video.py`)
 
-H.264 video from printer camera over PPPP channel 1. Registered as `"videoqueue"`.
-Key methods: `api_light_state(bool)`, `api_video_profile(id)`, `set_video_enabled(bool)`.
+H.264 video from printer camera over PPPP channel 1. One instance per camera-supported printer
+index; registered as `videoqueue:<printer_index>`.
+Key methods: `api_light_state(bool)`, `api_video_profile(id)`, `viewer_connected()` /
+`viewer_disconnected()` (ref-counted), `set_video_enabled(bool)`, `set_timelapse_enabled(bool)`,
+`request_live_recovery()`.
 Video profiles: `"sd"` (848×480), `"hd"` (1280×720, default), `"fhd"` (1920×1080, snapshot-only).
 Stall detection: no frames for 5 seconds → soft restart; after 3 consecutive failures → `ServiceRestartSignal`.
 
 ### FileTransferService (`web/service/filetransfer.py`)
 
-GCode upload pipeline. Registered as `"filetransfer"`. Calls `patch_gcode_time()`,
-`extract_layer_count()`, and `pppp_send_file()`. Progress streamed via `/ws/upload`.
+GCode upload pipeline. Singleton, registered as `"filetransfer"` (shared across all printers;
+each call takes an explicit `printer_index`). Calls `patch_gcode_time()`,
+`extract_layer_count()`, and `pppp_send_file()`. Progress streamed via `/ws/upload`. `send_bytes()`
+is the same pipeline used by History's "reprint" action.
 
 ### PrintHistory (`web/service/history.py`)
 
-SQLite print log (`~/.config/ankerctl/history.db`). Not a `Service` — accessed via `mqtt.history`.
-Schema: `id, filename, status, started_at, finished_at, duration_sec, progress, failure_reason, task_id`.
+SQLite print log (`~/.config/ankerctl/history.db`, one shared file across all printers). Not a
+`Service` — accessed via `mqtt.history`.
+Schema: `id, filename, printer_index, status, started_at, finished_at, duration_sec, progress,
+failure_reason, task_id, archive_relpath, archive_size, preview_url`.
 Status values: `started`, `finished`, `failed`, `interrupted`.
 Placeholder filenames ignored: `"unknown"`, `"unknown.gcode"`, `""`.
+`archive_upload()` saves the uploaded GCode + a thumbnail (`get_archive_path()`/`get_thumbnail_path()`);
+`POST /api/history/<id>/reprint` re-sends the archived GCode through `FileTransferService`.
+Because all configured printers share one history DB, most read/write methods accept a
+`printer_index` filter — always scope by it explicitly rather than assuming a single-printer DB.
 
 ### TimelapseService (`web/service/timelapse.py`)
 
@@ -545,12 +713,13 @@ env.config        # Configuration manager
 env.printer_index # Selected printer (0-based)
 env.insecure      # TLS verification flag
 env.pppp_dump     # PPPP debug log path
+env.mqtt_ca_cert  # CA cert path for local MQTT TLS verification (--mqtt-ca-cert / ANKERCTL_MQTT_CA_CERT)
 ```
 
 ### MQTT Command Pattern
 
 ```python
-client = cli.mqtt.mqtt_open(env.config, env.printer_index, env.insecure)
+client = cli.mqtt.mqtt_open(env.config, env.printer_index, env.insecure, env.mqtt_ca_cert)
 cmd = {
     "commandType": MqttMsgType.ZZ_MQTT_CMD_GCODE_COMMAND.value,
     "cmdData": "G28",
@@ -628,7 +797,7 @@ See `documentation/MQTT_COMMANDS.md` for the full MQTT command type reference, t
 
 **Most-used command types:** `ZZ_MQTT_CMD_GCODE_COMMAND` (0x0413, ct=1043), `ZZ_MQTT_CMD_PRINT_CONTROL` (0x03f0, ct=1008: 2=pause, 3=resume, 4=stop), `ZZ_MQTT_CMD_AUTO_LEVELING` (0x03ef).
 
-**Key notification types:** ct=1000 (state: 0=idle, 1=printing, 2=paused, 8=aborted), ct=1001 (progress 0-10000 scale + time remaining/elapsed + filename + realSpeed), ct=1003/1004 (nozzle/bed temp in 1/100 °C), ct=1007 (auto-level probe progress), ct=1044 (file path at print start), ct=1052 (layer counts — not used for % progress, use ct=1001 instead).
+**Key notification types:** ct=1000 (state: 0=idle, 1=printing, 2=paused, 8=aborted), ct=1001 (progress 0-10000 scale + time remaining/elapsed + filename + realSpeed), ct=1003/1004 (nozzle/bed temp in 1/100 °C), ct=1005 (`ZZ_MQTT_CMD_FAN_SPEED`, part cooling fan speed as a percent, forwarded to HA as `fan_speed`), ct=1007 (auto-level probe progress), ct=1044 (file path at print start), ct=1052 (layer counts — not used for % progress, use ct=1001 instead).
 
 ## Feature Notes
 
@@ -657,13 +826,39 @@ and Web Services Reference sections above. Brief architectural notes per feature
 - `web/service/filament.py` (`FilamentStore`), SQLite at `~/.config/ankerctl/filament.db`
 - Preheat sends `M104 S<nozzle_temp_other_layer>` and `M140 S<bed_temp_other_layer>` via MQTT
 - UI tab: `static/tabs/filaments.html` (between History and Timelapse in navbar)
+- **Nozzle temperature bounds:** the effective max nozzle temperature is 260°C on the stock hotend
+  or 300°C with the **All-Metal Hotend** setting enabled (bed max is always 100°C, `HOTEND_BED_MAX_C`
+  in `cli/model.py`). This is a **per-printer** setting, toggled at **Setup tab → Printer → Hotend**
+  (checkbox "All-Metal Hotend (raises nozzle limit to 300°C)") — not in the Filaments tab, despite
+  living conceptually next to filament temperature settings; it shipped there first and was moved.
+  Backend: `GET/POST /api/settings/filament-service` carries an independent `all_metal_hotend`
+  field alongside the rest of that endpoint's tuning payload; resolved server-side by
+  `_hotend_all_metal_enabled()` / `_hotend_nozzle_max_c()` in `web/__init__.py`, backed by
+  `HOTEND_STANDARD_NOZZLE_MAX_C = 260` / `HOTEND_ALL_METAL_NOZZLE_MAX_C = 300` in `cli/model.py`.
+  Every server-side code path that sets a nozzle target — raw GCode temperature commands are not
+  intercepted, but filament-profile apply, Filament Service preheat, and manual-swap preheat all
+  are — clamps through `_hotend_nozzle_max_c()`, and unresolvable config always falls back to the
+  lower/safer 260°C ceiling. Known side effect: existing manual preheat values above 260°C on a
+  stock-hotend printer get silently clamped down the next time they're saved.
+- **Filament Service (swap wizard):** guided (automatic) or manual filament-swap flow — homes,
+  raises Z, parks, heats, unloads, prompts, loads, purges, cools. Endpoints under
+  `/api/filaments/service/*` and `/api/settings/filament-service*` (see Web API Reference).
+  Tuning defaults come from the `FILAMENT_*` env vars (see Environment Variables) and are also
+  editable per-deployment via the local JSON file at `/api/settings/filament-service/advanced`.
 
 ### Printer Selector
 - Navbar dropdown when multiple printers configured; persisted as `active_printer_index` in `default.json`
-- `PRINTER_INDEX` env var locks selection; switching restarts all services; blocked (409) during print
+- `PRINTER_INDEX` env var locks selection (`POST /api/printers/active` returns 403)
+- Switching printers is **not** blocked by an in-progress print: `MqttQueue`/`PPPPService`/`VideoQueue`
+  are per-printer instances (see Web Services Reference), so a print or timelapse running on a
+  non-active printer keeps running when the UI switches to a different one. Switching to a model in
+  `UNSUPPORTED_PRINTERS` (currently just the eufyMake E1 UV printer, `V8260`) is rejected with 403.
 
 ### Debug Tab (`ANKERCTL_DEV_MODE=true`)
-- Sections: State Inspector, Controls (debug logging toggle), Simulation (fake events), Services health panel, Log Viewer
+- 7 sub-tabs (`static/tabs/debug.html`): Inspector (`/api/debug/state`), Reports
+  (`/api/debug/printer-report/<name>`), Controls (debug logging toggle), Simulation (fake events),
+  Services (health panel + restart + PPPP connectivity test), Logs (log viewer), Browser
+  (client-side clipboard/camera capability self-tests, no backend calls)
 - All `/api/debug/*` endpoints require auth; see Debug Endpoints table in Web API Reference
 
 ### Bed Level Map
@@ -721,7 +916,7 @@ The `HEALTHCHECK` in `Dockerfile` resolves `FLASK_HOST` (`0.0.0.0`/`::` → `127
 ### Adding a New Web Route
 
 1. Add Flask route function in `web/__init__.py`
-2. If it modifies state, make it POST/DELETE (auth enforced automatically)
+2. If it modifies state, make it POST/PUT/DELETE (auth enforced automatically)
 3. If it's a GET that should require auth, add path to `_PROTECTED_GET_PATHS`
 4. If it's a debug-only route, add inside the `ANKERCTL_DEV_MODE` block at the bottom
 
@@ -759,3 +954,14 @@ Add the path (or prefix) to `_PROTECTED_GET_PATHS` or rely on the `is_debug_path
 - Never commit `login.json` or expose `user_id`/`auth_token` values
 - The MQTT `RECOVER_FACTORY` command requires `--force` flag as a safety measure
 - Log viewer (`/api/debug/logs/<filename>`) has path-traversal protection (rejects `/`, `\`, `..`)
+- **Auth model has no setup-time exemption**: once an API key is configured (env var or config
+  file), it is required on every write, including first-run setup endpoints. Only the complete
+  absence of a configured key disables auth entirely — see Authentication Rules under Web API Reference.
+- **Nozzle temperature is bounded server-side** on every path that sets a target from a stored
+  profile or the Filament Service (260°C stock / 300°C with All-Metal Hotend enabled, bed 100°C) —
+  see the All-Metal Hotend note under Filament Profiles. Raw GCode sent through
+  `POST /api/printer/gcode` is **not** intercepted for `M104`/`M140` values; that endpoint is
+  explicitly the "expert" escape hatch and bypasses the profile-level temperature clamp.
+- Z-offset writes (`POST /api/printer/z-offset`, `.../nudge`) are clamped to ±2.0mm
+  (`Z_OFFSET_MIN_MM`/`_MAX_MM` in `web/__init__.py`) — there is no Anker-documented safe range,
+  this bound exists specifically to prevent driving the nozzle into the bed.
