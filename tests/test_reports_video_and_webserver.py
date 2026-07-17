@@ -203,9 +203,10 @@ def test_read_printer_report_disconnects_client_and_summary_builds_groups(monkey
     manager = FakeConfigManager(_base_config())
     old_values, old_svc = _install_app_state(config=manager, printer_index=0, insecure=False)
     disconnects = []
+    opens = []
 
     client = SimpleNamespace(_mqtt=SimpleNamespace(disconnect=lambda: disconnects.append(True)))
-    monkeypatch.setattr("cli.mqtt.mqtt_open", lambda config, printer_index, insecure: client)
+    monkeypatch.setattr("cli.mqtt.mqtt_open", lambda config, printer_index, insecure: opens.append(True) or client)
     monkeypatch.setattr(
         "web._collect_printer_gcode_output",
         lambda client, gcode, window, drain: {
@@ -224,15 +225,16 @@ def test_read_printer_report_disconnects_client_and_summary_builds_groups(monkey
     assert report["name"] == "probe_offset"
     assert report["gcode"] == "M851"
     assert disconnects == [True]
+    assert opens == [True]
 
     mqtt = SimpleNamespace(
         get_z_offset_state=lambda: {"available": True, "steps": 25, "mm": 0.25, "source": "cached"},
         refresh_z_offset=lambda timeout=None: {"available": True, "steps": 25, "mm": 0.25, "source": "live"},
     )
-    old_values, old_svc = _install_app_state(svc=FakeBorrowServices(mqtt))
+    old_values, old_svc = _install_app_state(svc=FakeBorrowServices(mqtt), config=manager)
     monkeypatch.setattr(
         "web._read_printer_report",
-        lambda name, printer_index=None: {
+        lambda name, printer_index=None, client=None: {
             "name": name,
             "label": name,
             "gcode": {"settings": "M503", "probe_offset": "M851", "babystep": "M290 R"}[name],
@@ -253,6 +255,9 @@ def test_read_printer_report_disconnects_client_and_summary_builds_groups(monkey
     assert summary["live_z_offset"]["display"] == "0.25 mm"
     assert any(item["command"] == "M851" for item in summary["highlights"])
     assert any(item["command"] == "M290" for item in summary["groups"]["leveling"])
+    # Summary must open exactly one shared connection for all three reports.
+    assert opens == [True, True]
+    assert disconnects == [True, True]
 
 
 def test_bed_leveling_last_route_reads_latest_saved_grid(tmp_path, monkeypatch):
@@ -273,6 +278,71 @@ def test_bed_leveling_last_route_reads_latest_saved_grid(tmp_path, monkeypatch):
     assert response.status_code == 200
     assert response.get_json()["grid"] == [[0.2]]
     assert response.get_json()["saved_at"] == "20260101_110000"
+
+
+def test_bed_leveling_last_route_scopes_by_printer_index(tmp_path, monkeypatch):
+    client = app.test_client()
+    bed_dir = tmp_path / "bed_leveling"
+    bed_dir.mkdir()
+    (bed_dir / "20260101_100000_p0.bed").write_text(json.dumps({"grid": [[0.1]], "printer_index": 0}))
+    (bed_dir / "20260101_110000_p1.bed").write_text(json.dumps({"grid": [[0.2]], "printer_index": 1}))
+
+    monkeypatch.setattr("web._log_dir", str(tmp_path))
+    manager = FakeConfigManager(_base_config(), config_root=tmp_path)
+    old_values, old_svc = _install_app_state(login=True, api_key=None, config=manager, printer_index=0)
+
+    try:
+        response = client.get("/api/printer/bed-leveling/last?printer_index=0")
+    finally:
+        _restore_app_state(old_values, old_svc)
+
+    assert response.status_code == 200
+    assert response.get_json()["grid"] == [[0.1]]
+    assert response.get_json()["saved_at"] == "20260101_100000"
+
+
+def test_bed_leveling_last_route_falls_back_to_legacy_unsuffixed_files(tmp_path, monkeypatch):
+    client = app.test_client()
+    bed_dir = tmp_path / "bed_leveling"
+    bed_dir.mkdir()
+    (bed_dir / "20260101_100000.bed").write_text(json.dumps({"grid": [[0.3]]}))
+
+    monkeypatch.setattr("web._log_dir", str(tmp_path))
+    manager = FakeConfigManager(_base_config(), config_root=tmp_path)
+    old_values, old_svc = _install_app_state(login=True, api_key=None, config=manager, printer_index=0)
+
+    try:
+        response = client.get("/api/printer/bed-leveling/last?printer_index=0")
+    finally:
+        _restore_app_state(old_values, old_svc)
+
+    assert response.status_code == 200
+    assert response.get_json()["grid"] == [[0.3]]
+    assert response.get_json()["saved_at"] == "20260101_100000"
+
+
+def test_read_bed_leveling_grid_skips_unparseable_rows(tmp_path, monkeypatch):
+    manager = FakeConfigManager(_base_config(), config_root=tmp_path)
+    old_values, old_svc = _install_app_state(config=manager, printer_index=0, insecure=False)
+
+    monkeypatch.setattr("web._log_dir", str(tmp_path))
+    monkeypatch.setattr("cli.mqtt.mqtt_open", lambda config, printer_index, insecure: object())
+    monkeypatch.setattr(
+        "cli.mqtt.mqtt_gcode_dump",
+        lambda client, gcode, collect_window=4.0: [
+            {"resData": "BL-Grid-0 -0.767-0.642 -0.500\n"},
+            {"resData": "BL-Grid-1 -0.500 -0.250\n"},
+        ],
+    )
+
+    try:
+        data, err = _read_bed_leveling_grid()
+    finally:
+        _restore_app_state(old_values, old_svc)
+
+    assert err is None
+    assert data["grid"] == [[-0.5, -0.25]]
+    assert data["rows"] == 1
 
 
 def test_video_download_requires_auth_and_streams_when_enabled():

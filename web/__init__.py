@@ -292,7 +292,9 @@ if not app.secret_key:
 app.svc = ServiceManager()
 app.filament_swap_lock = threading.Lock()
 app.filament_swap_state = {}
+app.filament_swap_threads = {}
 app.pppp_probe_lock = threading.Lock()
+app.printer_switch_lock = threading.Lock()
 
 
 def _default_pppp_probe_state():
@@ -453,6 +455,32 @@ def _printer_video_supported(cfg=None, printer_index=None):
     return bool(camera_settings.get("printer_supported"))
 
 
+def _printer_is_unsupported(cfg=None, printer_index=None):
+    """Whether the printer at printer_index (default: active) is an unsupported model.
+
+    Scoped per-printer so a blocked device (e.g. a eufyMake E1 mixed into the same
+    Anker account) doesn't shadow requests for a different, fully-supported printer.
+    """
+    active_index = app.config.get("printer_index", 0)
+    if cfg is None and (printer_index is None or printer_index == active_index):
+        override = app.config.get("unsupported_device")
+        if override is not None:
+            return bool(override)
+
+    if cfg is None:
+        config = app.config.get("config")
+        if not config:
+            return False
+        with config.open() as opened_cfg:
+            return _printer_is_unsupported(opened_cfg, printer_index=printer_index)
+
+    idx = _service_printer_index(printer_index)
+    printers = getattr(cfg, "printers", []) or []
+    if 0 <= idx < len(printers):
+        return printers[idx].model in UNSUPPORTED_PRINTERS
+    return False
+
+
 def _get_pppp_probe_state(printer_index=None, create=True):
     printer_index = 0 if printer_index is None else int(printer_index)
     probe = getattr(app, "pppp_probe", None)
@@ -596,6 +624,9 @@ app.record_printer_alert = _record_printer_alert
 # Resolve log directory once: honour env var, fall back to None on bare metal
 _log_dir = os.getenv("ANKERCTL_LOG_DIR") or ("/logs" if os.path.isdir("/logs") else None)
 
+# Ping/pong keepalive: without it, half-open clients (laptop sleep, network
+# partition) leave zombie WS threads and service queue taps alive indefinitely.
+app.config["SOCK_SERVER_OPTIONS"] = {"ping_interval": 25}
 sock = Sock(app)
 
 PRINTERS_WITHOUT_CAMERA = sorted(web.camera.PRINTERS_WITHOUT_CAMERA)
@@ -1072,7 +1103,7 @@ FILAMENT_SERVICE_HEAT_TOLERANCE_C = 5
 FILAMENT_SERVICE_TEMP_MAX_AGE_S = float(os.getenv("FILAMENT_SERVICE_TEMP_MAX_AGE_S", 15.0))
 FILAMENT_SERVICE_MANUAL_SWAP_DEFAULT_TEMP_C = 180
 FILAMENT_SERVICE_MANUAL_SWAP_MIN_TEMP_C = 130
-FILAMENT_SERVICE_MANUAL_SWAP_MAX_TEMP_C = 300
+FILAMENT_SWAP_CANCEL_JOIN_TIMEOUT_S = 2.0
 _FILAMENT_SWAP_RUNNING_PHASES = frozenset({
     "homing",
     "heating_unload",
@@ -1128,9 +1159,60 @@ FILAMENT_SWAP_ADVANCED_CONFIG_DEFAULT = {
 Z_OFFSET_STEP_MM = 0.01
 Z_OFFSET_REFRESH_TIMEOUT_S = 5.0
 Z_OFFSET_CONFIRM_TIMEOUT_S = 8.0
+# No documented safe range exists; +/-2mm is a conservative bound that still
+# covers any realistic first-layer correction while preventing bed crashes.
+Z_OFFSET_MIN_MM = -2.0
+Z_OFFSET_MAX_MM = 2.0
+GCODE_CONSOLE_MAX_LINES = 200
 
 
-def _filament_service_temp(profile):
+def _printer_sn(cfg, printer_index):
+    printers = getattr(cfg, "printers", None) or []
+    if not (0 <= printer_index < len(printers)):
+        return None
+    return getattr(printers[printer_index], "sn", None)
+
+
+def _hotend_all_metal_enabled(cfg, printer_index):
+    printer_sn = _printer_sn(cfg, printer_index)
+    if not printer_sn:
+        return False
+    fs_config = merge_dict_defaults(
+        getattr(cfg, "filament_service", None), cli.model.default_filament_service_config()
+    )
+    per_printer = fs_config.get("per_printer")
+    if not isinstance(per_printer, dict):
+        return False
+    entry = per_printer.get(printer_sn)
+    return bool(entry.get("all_metal_hotend")) if isinstance(entry, dict) else False
+
+
+def _hotend_nozzle_max_c(cfg=None, printer_index=None):
+    """Return the nozzle temperature ceiling for the given printer's hotend.
+
+    260C for the stock hotend, 300C if the printer's all_metal_hotend
+    per-printer setting is enabled. Falls back to the standard (lower,
+    safer) ceiling if the printer/config can't be resolved.
+    """
+    printer_index = _service_printer_index(printer_index)
+
+    def _resolve(cfg):
+        if not cfg:
+            return cli.model.HOTEND_STANDARD_NOZZLE_MAX_C
+        if _hotend_all_metal_enabled(cfg, printer_index):
+            return cli.model.HOTEND_ALL_METAL_NOZZLE_MAX_C
+        return cli.model.HOTEND_STANDARD_NOZZLE_MAX_C
+
+    if cfg is not None:
+        return _resolve(cfg)
+    config = app.config.get("config")
+    if not config:
+        return cli.model.HOTEND_STANDARD_NOZZLE_MAX_C
+    with config.open() as opened_cfg:
+        return _resolve(opened_cfg)
+
+
+def _filament_service_temp(profile, printer_index=None):
     temp = (
         profile.get("nozzle_temp_other_layer")
         or profile.get("nozzle_temp_first_layer")
@@ -1143,7 +1225,7 @@ def _filament_service_temp(profile):
         temp = 0
     if temp <= 0:
         raise ValueError("Filament profile has no usable nozzle temperature")
-    return temp
+    return max(0, min(temp, _hotend_nozzle_max_c(printer_index=printer_index)))
 
 
 def _filament_service_bool(value):
@@ -1196,10 +1278,12 @@ def _filament_service_setting_seconds(settings, key, default=FILAMENT_SERVICE_SW
         return round(default, 2)
 
 
-def _normalize_filament_service_settings(settings):
+def _normalize_filament_service_settings(settings, printer_index=None, cfg=None):
     normalized = dict(settings or {})
     normalized["allow_legacy_swap"] = _filament_service_bool(normalized.get("allow_legacy_swap"))
-    normalized["manual_swap_preheat_temp_c"] = _filament_service_manual_swap_temp(normalized)
+    normalized["manual_swap_preheat_temp_c"] = _filament_service_manual_swap_temp(
+        normalized, printer_index=printer_index, cfg=cfg
+    )
     normalized["quick_move_length_mm"] = _filament_service_setting_length(normalized, "quick_move_length_mm")
     normalized["swap_prime_length_mm"] = _filament_service_setting_length(
         normalized,
@@ -1550,6 +1634,9 @@ def _filament_swap_state_set_if_absent(state):
         printer_index = _service_printer_index(state.get("printer_index"))
         if states.get(printer_index) is not None:
             return None
+        thread = app.filament_swap_threads.get(printer_index)
+        if thread is not None and thread.is_alive():
+            return None
         state["printer_index"] = printer_index
         states[printer_index] = state
         return dict(state)
@@ -1586,9 +1673,11 @@ def _filament_swap_state_clear(token=None, printer_index=None):
         return dict(state)
 
 
-def _filament_swap_start_background(target, token):
+def _filament_swap_start_background(target, token, printer_index):
     thread = threading.Thread(target=target, args=(token,), daemon=True)
     thread.start()
+    with app.filament_swap_lock:
+        app.filament_swap_threads[_service_printer_index(printer_index)] = thread
     return thread
 
 
@@ -1802,13 +1891,13 @@ def _send_filament_service_nozzle_target(mqtt, target_temp_c, should_continue=No
     return last_target
 
 
-def _filament_service_manual_swap_temp(settings):
+def _filament_service_manual_swap_temp(settings, printer_index=None, cfg=None):
     raw_temp = settings.get("manual_swap_preheat_temp_c", FILAMENT_SERVICE_MANUAL_SWAP_DEFAULT_TEMP_C)
     try:
         temp_c = int(raw_temp)
     except (TypeError, ValueError):
         temp_c = FILAMENT_SERVICE_MANUAL_SWAP_DEFAULT_TEMP_C
-    return max(FILAMENT_SERVICE_MANUAL_SWAP_MIN_TEMP_C, min(FILAMENT_SERVICE_MANUAL_SWAP_MAX_TEMP_C, temp_c))
+    return max(FILAMENT_SERVICE_MANUAL_SWAP_MIN_TEMP_C, min(_hotend_nozzle_max_c(cfg, printer_index=printer_index), temp_c))
 
 
 def _run_legacy_swap_unload(token):
@@ -2007,6 +2096,21 @@ def _run_legacy_swap_unload(token):
             message=f"Automatic unload failed: {exc}",
             error=str(exc),
         )
+    except Exception as exc:
+        log.exception("Filament swap unload worker crashed unexpectedly")
+        _filament_swap_state_update(
+            token,
+            printer_index=printer_index,
+            phase="error",
+            message=f"Automatic unload failed: {exc}",
+            error=str(exc),
+        )
+        try:
+            with borrow_mqtt(printer_index) as mqtt:
+                if mqtt:
+                    mqtt.send_gcode(_format_filament_swap_command("cooldown_nozzle", required=True))
+        except Exception:
+            pass
 
 
 def _run_legacy_swap_load(token):
@@ -2098,6 +2202,21 @@ def _run_legacy_swap_load(token):
             message=f"Automatic load / purge failed: {exc}",
             error=str(exc),
         )
+    except Exception as exc:
+        log.exception("Filament swap load worker crashed unexpectedly")
+        _filament_swap_state_update(
+            token,
+            printer_index=printer_index,
+            phase="error",
+            message=f"Automatic load / purge failed: {exc}",
+            error=str(exc),
+        )
+        try:
+            with borrow_mqtt(printer_index) as mqtt:
+                if mqtt:
+                    mqtt.send_gcode(_format_filament_swap_command("cooldown_nozzle", required=True))
+        except Exception:
+            pass
 
 
 def _z_offset_steps_to_mm(steps):
@@ -2139,6 +2258,8 @@ def _parse_z_offset_mm(payload, key):
 
 
 def _set_printer_z_offset(mqtt, target_mm, current=None):
+    if not (Z_OFFSET_MIN_MM <= target_mm <= Z_OFFSET_MAX_MM):
+        raise ValueError(f"target_mm must be between {Z_OFFSET_MIN_MM} and {Z_OFFSET_MAX_MM} mm")
     target_steps = _z_offset_mm_to_steps(target_mm)
     if current is None:
         current = mqtt.refresh_z_offset(timeout=Z_OFFSET_REFRESH_TIMEOUT_S)
@@ -2207,11 +2328,14 @@ from web.service.filament import FilamentStore
 def _validate_ws_auth(sock):
     """Check API key auth for WebSocket routes.
 
-    Flask's before_request middleware does not run for WebSocket routes,
-    so each handler must call this explicitly.  Auth succeeds if ANY of:
+    Flask's before_request runs for WebSocket routes too, but doesn't block
+    unauthenticated GETs (WS paths aren't in _PROTECTED_GET_PATHS) — so each
+    handler must call this explicitly to enforce auth when a key is
+    configured.  Auth succeeds if ANY of:
       - No API key is configured (backwards compatible)
       - Session cookie has authenticated=True
       - X-Api-Key header matches the configured key
+      - ?apikey= query parameter matches the configured key
 
     Returns True if authorized, False otherwise.  On failure, sends an
     error JSON message and the caller should return to close the socket.
@@ -2223,6 +2347,9 @@ def _validate_ws_auth(sock):
         return True
     header_key = request.headers.get("X-Api-Key")
     if header_key and secrets.compare_digest(header_key, api_key):
+        return True
+    query_key = request.args.get("apikey")
+    if query_key and secrets.compare_digest(query_key, api_key):
         return True
     try:
         sock.send(json.dumps({"error": "unauthorized"}))
@@ -2236,12 +2363,14 @@ def mqtt(sock):
     """
     Handles receiving and sending messages on the 'mqttqueue' stream service through websocket
     """
-    if not app.config["login"] or app.config.get("unsupported_device"):
+    if not app.config["login"]:
+        return
+    printer_index = _requested_printer_index()
+    if _printer_is_unsupported(printer_index=printer_index):
         return
     if not _validate_ws_auth(sock):
         return
 
-    printer_index = _requested_printer_index()
     # Cancel any reconnect back-off — the user just opened a browser tab,
     # which means they expect the connection to be live.
     _mqtt_svc_ref = get_mqtt_service(printer_index)
@@ -2271,12 +2400,14 @@ def video(sock):
     video_enabled is set True on connect and cleared when the last client disconnects,
     so multiple tabs can independently enable/disable without interfering.
     """
-    if not app.config["login"] or not app.config.get("video_supported") or app.config.get("unsupported_device"):
+    if not app.config["login"]:
+        return
+    printer_index = _requested_printer_index()
+    if not _printer_video_supported(printer_index=printer_index) or _printer_is_unsupported(printer_index=printer_index):
         return
     if not _validate_ws_auth(sock):
         return
 
-    printer_index = _requested_printer_index()
     vq = get_video_service(printer_index)
     if not vq:
         return
@@ -2406,13 +2537,16 @@ def pppp_state(sock):
       "connected"    — service running and PPPP handshake complete, or probe succeeded
       "disconnected" — service was connected but the connection was lost, or probe failed
     """
-    if not app.config["login"] or app.config.get("unsupported_device"):
+    if not app.config["login"]:
         log.info("Websocket connection rejected: no printer configured (use 'config import' or 'config login')")
+        return
+    printer_index = _requested_printer_index()
+    if _printer_is_unsupported(printer_index=printer_index):
+        log.info("Websocket connection rejected: printer_index=%s is an unsupported device", printer_index)
         return
     if not _validate_ws_auth(sock):
         return
 
-    printer_index = _requested_printer_index()
     log.info("Starting PPPP state websocket handler for printer_index=%s", printer_index)
 
     last_status = None
@@ -2571,14 +2705,16 @@ def ctrl(sock):
     """
     Handles controlling of light and video quality through websocket
     """
-    if not app.config["login"] or app.config.get("unsupported_device"):
+    if not app.config["login"]:
+        return
+    printer_index = _requested_printer_index()
+    if _printer_is_unsupported(printer_index=printer_index):
         return
     if not _validate_ws_auth(sock):
         return
 
     # send a response on connect, to let the client know the connection is ready
     sock.send(json.dumps({"ankerctl": 1}))
-    printer_index = _requested_printer_index()
     vq = get_video_service(printer_index)
     if vq:
         profile_id = getattr(vq, "saved_video_profile_id", None)
@@ -2596,6 +2732,9 @@ def ctrl(sock):
             break
         except (json.JSONDecodeError, TypeError) as exc:
             log.warning(f"/ws/ctrl: malformed message, ignoring: {exc}")
+            continue
+        except Exception as exc:
+            log.warning(f"/ws/ctrl: unexpected error, ignoring: {exc}")
             continue
 
         if "light" in msg:
@@ -2631,9 +2770,9 @@ def video_download():
     """
     Handles the video streaming/downloading feature in the Flask app
     """
-    # Enforce API key auth when configured; timelapse client uses ?for_timelapse=1
-    # on the loopback interface and does not carry a session, so allow it only when
-    # the request comes from localhost.
+    # Enforce API key auth when configured. There is no localhost/origin trust:
+    # every caller (incl. the timelapse client) must present the key via session,
+    # X-Api-Key header, or ?apikey= query param.
     api_key = app.config.get("api_key")
     if api_key:
         _hdr = request.headers.get("X-Api-Key", "")
@@ -2839,46 +2978,49 @@ def app_api_set_active_printer():
         return jsonify({"error": "Missing or invalid 'index' parameter"}), 400
 
     config = app.config["config"]
-    with config.open() as cfg:
-        if not cfg or new_index < 0 or new_index >= len(cfg.printers):
-            return jsonify({"error": f"Printer index {new_index} out of range"}), 400
+    # Serializes concurrent switch requests so register()/unregister() (unlocked
+    # in ServiceManager) and the config read-modify-write can't interleave.
+    with app.printer_switch_lock:
+        with config.open() as cfg:
+            if not cfg or new_index < 0 or new_index >= len(cfg.printers):
+                return jsonify({"error": f"Printer index {new_index} out of range"}), 400
 
-        # Block switching to an unsupported device (e.g. eufyMake E1 UV printer)
-        if cfg.printers[new_index].model in UNSUPPORTED_PRINTERS:
-            return jsonify({
-                "error": f"Device {cfg.printers[new_index].model} is not supported by ankerctl"
-            }), 403
+            # Block switching to an unsupported device (e.g. eufyMake E1 UV printer)
+            if cfg.printers[new_index].model in UNSUPPORTED_PRINTERS:
+                return jsonify({
+                    "error": f"Device {cfg.printers[new_index].model} is not supported by ankerctl"
+                }), 403
 
-        printer = cfg.printers[new_index]
-        video_supported = printer.model not in PRINTERS_WITHOUT_CAMERA
-        unsupported = printer.model in UNSUPPORTED_PRINTERS
+            printer = cfg.printers[new_index]
+            video_supported = printer.model not in PRINTERS_WITHOUT_CAMERA
+            unsupported = printer.model in UNSUPPORTED_PRINTERS
 
-    old_index = app.config["printer_index"]
-    if new_index == old_index:
-        return jsonify({"status": "ok", "message": "Already active"})
+        old_index = app.config["printer_index"]
+        if new_index == old_index:
+            return jsonify({"status": "ok", "message": "Already active"})
 
-    # Update in-memory state
-    app.config["printer_index"] = new_index
-    app.config["video_supported"] = video_supported
-    app.config["unsupported_device"] = unsupported
+        # Update in-memory state
+        app.config["printer_index"] = new_index
+        app.config["video_supported"] = video_supported
+        app.config["unsupported_device"] = unsupported
 
-    # Persist selection to config file
-    with config.modify() as cfg:
-        cfg.active_printer_index = new_index
+        # Persist selection to config file
+        with config.modify() as cfg:
+            cfg.active_printer_index = new_index
 
-    rich_service_manager = (
-        hasattr(app.svc, "svcs")
-        and hasattr(app.svc, "register")
-        and hasattr(app.svc, "unregister")
-    )
-    if rich_service_manager:
-        # Per-printer video/PPPP services stay attached to their own printer so
-        # background timelapses can continue even when the UI switches printers.
-        register_services(app)
-    else:
-        restart_all = getattr(app.svc, "restart_all", None)
-        if restart_all is not None:
-            restart_all(await_ready=False)
+        rich_service_manager = (
+            hasattr(app.svc, "svcs")
+            and hasattr(app.svc, "register")
+            and hasattr(app.svc, "unregister")
+        )
+        if rich_service_manager:
+            # Per-printer video/PPPP services stay attached to their own printer so
+            # background timelapses can continue even when the UI switches printers.
+            register_services(app)
+        else:
+            restart_all = getattr(app.svc, "restart_all", None)
+            if restart_all is not None:
+                restart_all(await_ready=False)
 
     log.info(f"Switched active printer: index {old_index} -> {new_index} ({printer.name})")
     return jsonify({"status": "ok", "printer": {"index": new_index, "name": printer.name, "sn": printer.sn}})
@@ -3089,6 +3231,14 @@ def app_api_files_local():
     # Snapshot the requested printer index at request time so the upload targets
     # the page's printer even if another tab switches the global active printer.
     printer_index = _requested_printer_index()
+
+    # Upload-only requests are harmless during a print; only block requests
+    # that would start a new print on top of the active job.
+    if not no_act:
+        with borrow_mqtt(printer_index) as mqtt:
+            if mqtt.is_printing or mqtt.has_pending_print_start or mqtt.is_preparing_print:
+                return {"error": "Printer is already busy with another print job"}, 409
+
     with app.config["config"].open() as cfg:
         rate_limit_mbps, rate_limit_source = cli.util.resolve_upload_rate_mbps_with_source(cfg)
 
@@ -3268,6 +3418,7 @@ def app_api_notifications_settings_update():
         notifications = _resolve_notifications(cfg)
         apprise_config = _resolve_apprise(cfg)
         apprise_config = _deep_update(apprise_config, apprise_payload)
+        apprise_config = merge_dict_defaults(apprise_config, default_apprise_config())
         notifications["apprise"] = apprise_config
         cfg.notifications = notifications
 
@@ -3291,6 +3442,7 @@ def app_api_notifications_test():
 
     if apprise_payload is not None:
         apprise_config = _deep_update(apprise_config, apprise_payload)
+        apprise_config = merge_dict_defaults(apprise_config, default_apprise_config())
 
     # Use explicit settings for snapshot generation test
     from web.notifications import AppriseNotifier
@@ -3454,6 +3606,15 @@ def app_api_settings_mqtt_update():
     if not isinstance(ha_payload, dict):
         return {"error": "Invalid home_assistant payload"}, 400
 
+    if "mqtt_port" in ha_payload:
+        try:
+            mqtt_port = int(ha_payload["mqtt_port"])
+        except (TypeError, ValueError):
+            return {"error": "mqtt_port must be an integer"}, 400
+        if not (1 <= mqtt_port <= 65535):
+            return {"error": "mqtt_port must be between 1 and 65535"}, 400
+        ha_payload["mqtt_port"] = mqtt_port
+
     with config.modify() as cfg:
         if not cfg:
             return {"error": "No printers configured"}, 400
@@ -3476,10 +3637,14 @@ def app_api_settings_mqtt_update():
 @app.get("/api/settings/filament-service")
 def app_api_settings_filament_service():
     config = app.config["config"]
+    printer_index = _requested_printer_index()
     with config.open() as cfg:
         if not cfg:
             return {"error": "No printers configured"}, 400
-        filament_config = _normalize_filament_service_settings(_resolve_filament_service_settings(cfg))
+        filament_config = _normalize_filament_service_settings(
+            _resolve_filament_service_settings(cfg), printer_index=printer_index, cfg=cfg
+        )
+        filament_config["all_metal_hotend"] = _hotend_all_metal_enabled(cfg, printer_index)
     return {"filament_service": filament_config}
 
 
@@ -3494,6 +3659,10 @@ def app_api_settings_filament_service_update():
     if not isinstance(fs_payload, dict):
         return {"error": "Invalid filament_service payload"}, 400
 
+    printer_index = _requested_printer_index()
+    all_metal_hotend = None
+    if "all_metal_hotend" in fs_payload:
+        all_metal_hotend = _filament_service_bool(fs_payload.pop("all_metal_hotend"))
     if "allow_legacy_swap" in fs_payload:
         fs_payload["allow_legacy_swap"] = _filament_service_bool(fs_payload["allow_legacy_swap"])
     if "manual_swap_preheat_temp_c" in fs_payload:
@@ -3519,10 +3688,28 @@ def app_api_settings_filament_service_update():
 
         current = _resolve_filament_service_settings(cfg)
         new_config = _deep_update(current, fs_payload)
-        new_config = _normalize_filament_service_settings(new_config)
+        if all_metal_hotend is not None:
+            printer_sn = _printer_sn(cfg, printer_index)
+            if not printer_sn:
+                return {"error": "No printer at requested printer_index"}, 400
+            per_printer = new_config.get("per_printer")
+            if not isinstance(per_printer, dict):
+                per_printer = {}
+            entry = per_printer.get(printer_sn)
+            entry = dict(entry) if isinstance(entry, dict) else {}
+            entry["all_metal_hotend"] = all_metal_hotend
+            per_printer[printer_sn] = entry
+            new_config["per_printer"] = per_printer
+        # Assign before normalizing so the manual-swap clamp sees an
+        # all_metal_hotend value changed in this same request.
         cfg.filament_service = new_config
+        new_config = _normalize_filament_service_settings(new_config, printer_index=printer_index, cfg=cfg)
+        cfg.filament_service = new_config
+        response_all_metal = _hotend_all_metal_enabled(cfg, printer_index)
 
-    return {"status": "ok", "filament_service": new_config}
+    result = dict(new_config)
+    result["all_metal_hotend"] = response_all_metal
+    return {"status": "ok", "filament_service": result}
 
 
 @app.get("/api/settings/filament-service/advanced")
@@ -3559,7 +3746,26 @@ def app_api_settings_filament_service_advanced_open():
 
 
 # GCode prefixes that are unsafe to send while a print is active
-_UNSAFE_GCODE_PREFIXES = {"G0", "G1", "G28", "G29", "G91", "G90"}
+_UNSAFE_GCODE_PREFIXES = {"G0", "G1", "G2", "G3", "G28", "G29", "G90", "G91", "G92", "M18", "M84"}
+
+
+def _gcode_unsafe_while_printing(line):
+    parts = line.upper().split()
+    if not parts:
+        return False
+    if parts[0] in _UNSAFE_GCODE_PREFIXES:
+        return True
+    if parts[0] == "M420":
+        # M420 S0 disables bed-mesh compensation mid-print; M420 V (query) is
+        # harmless and used by the bed-leveling feature, so only block S0.
+        rest = parts[1:]
+        for i, tok in enumerate(rest):
+            if tok == "S0":
+                return True
+            if tok == "S" and i + 1 < len(rest) and rest[i + 1] == "0":
+                return True
+    return False
+
 
 @app.post("/api/printer/gcode")
 def app_api_printer_gcode():
@@ -3575,12 +3781,19 @@ def app_api_printer_gcode():
     lines = cli.util.normalize_gcode_lines(gcode)
     if not lines:
         return {"error": "No executable gcode lines found"}, 400
+    if len(lines) > GCODE_CONSOLE_MAX_LINES:
+        return {
+            "error": (
+                f"Too many gcode lines ({len(lines)}); use the file upload/print "
+                f"feature for larger jobs (max {GCODE_CONSOLE_MAX_LINES} lines here)"
+            )
+        }, 400
 
     normalized_gcode = "\n".join(lines)
 
     with borrow_mqtt(printer_index) as mqtt:
         if mqtt.is_printing:
-            unsafe = [l for l in lines if l.split()[0].upper() in _UNSAFE_GCODE_PREFIXES]
+            unsafe = [l for l in lines if _gcode_unsafe_while_printing(l)]
             if unsafe:
                 return {"error": "Motion commands blocked while printing"}, 409
         mqtt.send_gcode(normalized_gcode)
@@ -3619,6 +3832,12 @@ def app_api_printer_control():
         return {"error": "Invalid control value"}, 400
 
     with borrow_mqtt(printer_index) as mqtt:
+        if value == 0 and not (
+            mqtt.is_printing
+            or mqtt.has_pending_print_start
+            or mqtt.is_preparing_print
+        ):
+            return {"error": "No active print to restart"}, 409
         mqtt.send_print_control(value)
 
     return {"status": "ok"}
@@ -3690,6 +3909,8 @@ def app_api_printer_z_offset_set():
     with borrow_mqtt(printer_index) as mqtt:
         try:
             return _set_printer_z_offset(mqtt, target_mm)
+        except ValueError as exc:
+            return {"error": str(exc)}, 400
         except TimeoutError as exc:
             return {"error": str(exc)}, 504
 
@@ -3713,6 +3934,8 @@ def app_api_printer_z_offset_nudge():
                 "display": f"{delta_mm:+.2f} mm",
             }
             return result
+        except ValueError as exc:
+            return {"error": str(exc)}, 400
         except TimeoutError as exc:
             return {"error": str(exc)}, 504
 
@@ -3765,7 +3988,12 @@ def _read_bed_leveling_grid(printer_index=None):
     for line in combined.splitlines():
         match = bl_pattern.search(line)
         if match:
-            values = [float(v) for v in match.group(1).split() if v]
+            try:
+                values = [float(v) for v in match.group(1).split() if v]
+            except ValueError:
+                # Truncated MQTT responses can glue values together (e.g. "-0.767-0.642")
+                log.warning(f"bed-leveling: could not parse grid row: {line!r}")
+                continue
             if values:
                 grid.append(values)
 
@@ -3780,16 +4008,17 @@ def _read_bed_leveling_grid(printer_index=None):
         "max": max(all_values),
         "rows": len(grid),
         "cols": max(len(row) for row in grid),
+        "printer_index": printer_index,
     }
 
-    # Persist grid to log directory as a timestamped .bed file
+    # Persist grid to log directory as a timestamped, printer-scoped .bed file
     if _log_dir:
         bed_dir = os.path.join(_log_dir, "bed_leveling")
         try:
             from datetime import datetime
             os.makedirs(bed_dir, exist_ok=True)
             ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-            bed_path = os.path.join(bed_dir, f"{ts}.bed")
+            bed_path = os.path.join(bed_dir, f"{ts}_p{printer_index}.bed")
             with open(bed_path, "w") as f:
                 json.dump(data, f)
             log.info(f"bed-leveling: saved grid to {bed_path}")
@@ -3990,22 +4219,25 @@ def _collect_printer_gcode_output(client, gcode, *, window, drain):
     }
 
 
-def _read_printer_report(name, printer_index=None):
+def _read_printer_report(name, printer_index=None, client=None):
     import cli.mqtt as cli_mqtt
 
     if name not in _PRINTER_REPORT_COMMANDS:
         raise KeyError(name)
 
     report = _PRINTER_REPORT_COMMANDS[name]
-    config = app.config.get("config")
-    if not config:
-        raise ConnectionError("No configuration loaded")
+    owns_client = client is None
 
-    printer_index = _service_printer_index(printer_index)
-    insecure = app.config.get("insecure", False)
+    if owns_client:
+        config = app.config.get("config")
+        if not config:
+            raise ConnectionError("No configuration loaded")
+        printer_index = _service_printer_index(printer_index)
+        insecure = app.config.get("insecure", False)
 
     try:
-        client = cli_mqtt.mqtt_open(config, printer_index, insecure)
+        if owns_client:
+            client = cli_mqtt.mqtt_open(config, printer_index, insecure)
         output = _collect_printer_gcode_output(
             client,
             report["gcode"],
@@ -4013,7 +4245,7 @@ def _read_printer_report(name, printer_index=None):
             drain=report["drain"],
         )
     finally:
-        if "client" in locals():
+        if owns_client and client is not None:
             _disconnect_mqtt_client(client)
 
     return {
@@ -4060,12 +4292,33 @@ def _read_printer_settings_summary(printer_index=None):
             except TimeoutError:
                 live_z_offset = mqtt.get_z_offset_state()
 
-    reports = {}
-    for name in ("settings", "probe_offset", "babystep"):
+    import cli.mqtt as cli_mqtt
+
+    # One shared connection for all three reports instead of paying the full
+    # connect/login handshake per report. If the shared open fails, fall back
+    # to per-report connections so error handling matches previous behavior.
+    shared_client = None
+    config = app.config.get("config")
+    if config:
         try:
-            reports[name] = _read_printer_report(name, printer_index=printer_index)
-        except Exception as exc:
-            reports[name] = {"name": name, "error": str(exc)}
+            shared_client = cli_mqtt.mqtt_open(
+                config, printer_index, app.config.get("insecure", False)
+            )
+        except Exception:
+            shared_client = None
+
+    reports = {}
+    try:
+        for name in ("settings", "probe_offset", "babystep"):
+            try:
+                reports[name] = _read_printer_report(
+                    name, printer_index=printer_index, client=shared_client
+                )
+            except Exception as exc:
+                reports[name] = {"name": name, "error": str(exc)}
+    finally:
+        if shared_client is not None:
+            _disconnect_mqtt_client(shared_client)
 
     commands = _extract_report_commands(
         reports.get("settings", {}).get("cleaned_output", ""),
@@ -4131,6 +4384,11 @@ def app_api_printer_bed_leveling():
     Do not call this during an active print.
     """
     printer_index = _requested_printer_index()
+    # get_mqtt_service (not borrow_mqtt): read-only check that must not start
+    # a stopped service or fail when no service is registered yet.
+    mqtt_svc = get_mqtt_service(printer_index)
+    if mqtt_svc is not None and getattr(mqtt_svc, "is_printing", False):
+        return {"error": "Cannot read bed leveling data while printing"}, 409
     data, err = _read_bed_leveling_grid(printer_index=printer_index)
     if err is not None:
         return err
@@ -4140,6 +4398,9 @@ def app_api_printer_bed_leveling():
 @app.get("/api/printer/settings-summary")
 def app_api_printer_settings_summary():
     printer_index = _requested_printer_index()
+    mqtt_svc = get_mqtt_service(printer_index)
+    if mqtt_svc is not None and getattr(mqtt_svc, "is_printing", False):
+        return {"error": "Cannot read printer settings while printing"}, 409
     try:
         return _read_printer_settings_summary(printer_index=printer_index)
     except TimeoutError as exc:
@@ -4168,17 +4429,27 @@ def app_api_printer_alerts():
 
 @app.get("/api/printer/bed-leveling/last")
 def app_api_printer_bed_leveling_last():
-    """Return the most recently saved bed leveling grid from the log directory."""
+    """Return the most recently saved bed leveling grid for the requested printer."""
     import glob
+    import re
     if not _log_dir:
         return {"error": "No log directory configured (set ANKERCTL_LOG_DIR)"}, 404
+    printer_index = _requested_printer_index()
     bed_dir = os.path.join(_log_dir, "bed_leveling")
-    files = sorted(glob.glob(os.path.join(bed_dir, "*.bed")))
+    files = sorted(glob.glob(os.path.join(bed_dir, f"*_p{printer_index}.bed")))
+    if not files:
+        # Legacy files predate per-printer tracking (no _pN suffix); keep them
+        # visible as a fallback so pre-fix installs don't lose saved data.
+        suffixed = re.compile(r"_p\d+\.bed$")
+        files = sorted(
+            f for f in glob.glob(os.path.join(bed_dir, "*.bed"))
+            if not suffixed.search(f)
+        )
     if not files:
         return {"error": "No saved bed leveling data found"}, 404
     with open(files[-1]) as f:
         data = json.load(f)
-    data["saved_at"] = os.path.basename(files[-1]).replace(".bed", "")
+    data["saved_at"] = re.sub(r"(?:_p\d+)?\.bed$", "", os.path.basename(files[-1]))
     return data
 
 
@@ -4555,6 +4826,8 @@ def app_api_history_clear():
         except (TypeError, ValueError):
             clear_printer_index = requested_printer_index
     with borrow_mqtt(requested_printer_index) as mqtt:
+        if mqtt.history.has_active_entry(printer_index=clear_printer_index):
+            return {"error": "Cannot clear history while a print is in progress"}, 409
         mqtt.history.clear(printer_index=clear_printer_index)
     return {"status": "ok"}
 
@@ -4645,8 +4918,11 @@ def app_api_history_reprint(entry_id):
     with app.config["config"].open() as cfg:
         rate_limit_mbps, rate_limit_source = cli.util.resolve_upload_rate_mbps_with_source(cfg)
 
-    with open(archive_path, "rb") as fh:
-        archive_bytes = fh.read()
+    try:
+        with open(archive_path, "rb") as fh:
+            archive_bytes = fh.read()
+    except FileNotFoundError:
+        return {"error": "Archived GCode is no longer available"}, 404
 
     with app.svc.borrow("filetransfer") as ft:
         if not ft:
@@ -4729,8 +5005,8 @@ def app_api_filaments_apply(profile_id):
     nozzle = profile.get("nozzle_temp_first_layer") or profile.get("nozzle_temp_other_layer") or profile.get("nozzle_temp", 0)
     bed    = profile.get("bed_temp_first_layer") or profile.get("bed_temp_other_layer") or profile.get("bed_temp", 0)
     try:
-        nozzle = max(0, min(int(nozzle), 350))
-        bed    = max(0, min(int(bed), 130))
+        nozzle = max(0, min(int(nozzle), _hotend_nozzle_max_c(printer_index=printer_index)))
+        bed    = max(0, min(int(bed), cli.model.HOTEND_BED_MAX_C))
     except (TypeError, ValueError):
         return {"error": "Invalid temperature values in filament profile"}, 422
     gcode = f"M104 S{nozzle}\nM140 S{bed}"
@@ -4766,7 +5042,7 @@ def app_api_filament_service_preheat():
     payload = request.get_json(silent=True) or {}
     try:
         profile = _filament_service_profile(payload, "profile_id")
-        temp_c = _filament_service_temp(profile)
+        temp_c = _filament_service_temp(profile, printer_index=printer_index)
         gcode = f"M104 S{temp_c}"
         with borrow_mqtt(printer_index) as mqtt:
             _assert_filament_service_ready(mqtt)
@@ -4802,10 +5078,12 @@ def app_api_filament_service_move():
         config = app.config["config"]
         with config.open() as cfg:
             filament_settings = _normalize_filament_service_settings(
-                _resolve_filament_service_settings(cfg) if cfg else cli.model.default_filament_service_config()
+                _resolve_filament_service_settings(cfg) if cfg else cli.model.default_filament_service_config(),
+                printer_index=printer_index,
+                cfg=cfg,
             )
         profile = _filament_service_profile(payload, "profile_id")
-        temp_c = _filament_service_temp(profile)
+        temp_c = _filament_service_temp(profile, printer_index=printer_index)
         raw_length_mm = payload.get("length_mm", filament_settings["quick_move_length_mm"])
         length_mm = _filament_service_length({"length_mm": raw_length_mm}, "length_mm")
         delta_mm = length_mm if action == "extrude" else -length_mm
@@ -4858,14 +5136,16 @@ def app_api_filament_service_swap_start():
     with config.open() as cfg:
         if not cfg:
             return {"error": "No printers configured"}, 400
-        filament_settings = _normalize_filament_service_settings(_resolve_filament_service_settings(cfg))
+        filament_settings = _normalize_filament_service_settings(
+            _resolve_filament_service_settings(cfg), printer_index=printer_index, cfg=cfg
+        )
 
     allow_legacy_swap = _filament_service_bool(filament_settings.get("allow_legacy_swap"))
     if "allow_legacy_swap" in payload:
         allow_legacy_swap = _filament_service_bool(payload.get("allow_legacy_swap"))
-    manual_swap_preheat_temp_c = _filament_service_manual_swap_temp(filament_settings)
+    manual_swap_preheat_temp_c = _filament_service_manual_swap_temp(filament_settings, printer_index=printer_index)
     if "manual_swap_preheat_temp_c" in payload:
-        manual_swap_preheat_temp_c = _filament_service_manual_swap_temp(payload)
+        manual_swap_preheat_temp_c = _filament_service_manual_swap_temp(payload, printer_index=printer_index)
 
     unload_profile = None
     load_profile = None
@@ -4901,8 +5181,8 @@ def app_api_filament_service_swap_start():
         try:
             unload_profile = _filament_service_profile(payload, "unload_profile_id")
             load_profile = _filament_service_profile(payload, "load_profile_id")
-            unload_temp_c = _filament_service_temp(unload_profile)
-            load_temp_c = _filament_service_temp(load_profile)
+            unload_temp_c = _filament_service_temp(unload_profile, printer_index=printer_index)
+            load_temp_c = _filament_service_temp(load_profile, printer_index=printer_index)
             prime_length_mm = _filament_service_length(
                 {"prime_length_mm": payload.get("prime_length_mm", filament_settings["swap_prime_length_mm"])},
                 "prime_length_mm",
@@ -4994,7 +5274,7 @@ def app_api_filament_service_swap_start():
         with borrow_mqtt(printer_index) as mqtt:
             _assert_filament_service_ready(mqtt)
             if allow_legacy_swap:
-                _filament_swap_start_background(_run_legacy_swap_unload, swap_state["token"])
+                _filament_swap_start_background(_run_legacy_swap_unload, swap_state["token"], printer_index)
             else:
                 mqtt.send_gcode(f"M104 S{manual_swap_preheat_temp_c}")
     except RuntimeError as exc:
@@ -5074,7 +5354,7 @@ def app_api_filament_service_swap_confirm():
         )
         return {"error": str(exc)}, 503
 
-    _filament_swap_start_background(_run_legacy_swap_load, swap_state["token"])
+    _filament_swap_start_background(_run_legacy_swap_load, swap_state["token"], printer_index)
     current_state = _filament_swap_state_get(swap_state["token"], printer_index=printer_index)
     if current_state is None:
         return {
@@ -5102,6 +5382,17 @@ def app_api_filament_service_swap_cancel():
         return {"error": "Swap token mismatch"}, 409
     printer_index = _service_printer_index(swap_state.get("printer_index", printer_index))
     cancelled_swap = _filament_swap_state_clear(swap_state["token"], printer_index=printer_index)
+    # Wait for the background worker to notice the cancellation so its final
+    # GCode sends cannot interleave with a swap started right after this call.
+    with app.filament_swap_lock:
+        swap_thread = app.filament_swap_threads.get(printer_index)
+    if swap_thread is not None:
+        if swap_thread.is_alive():
+            swap_thread.join(timeout=FILAMENT_SWAP_CANCEL_JOIN_TIMEOUT_S)
+        if not swap_thread.is_alive():
+            with app.filament_swap_lock:
+                if app.filament_swap_threads.get(printer_index) is swap_thread:
+                    app.filament_swap_threads.pop(printer_index, None)
     try:
         with borrow_mqtt(printer_index) as mqtt:
             if mqtt:
@@ -5503,7 +5794,8 @@ def webserver(config, printer_index, host, port, insecure=False, **kwargs):
 if os.getenv("ANKERCTL_DEV_MODE", "false").lower() == "true":
     @app.get("/api/debug/state")
     def app_api_debug_state():
-        with borrow_mqtt() as mqtt:
+        printer_index = _requested_printer_index()
+        with borrow_mqtt(printer_index) as mqtt:
             if not mqtt:
                 return {"error": "Service unavailable"}, 503
             return mqtt.get_state()
@@ -5512,7 +5804,8 @@ if os.getenv("ANKERCTL_DEV_MODE", "false").lower() == "true":
     def app_api_debug_config():
         payload = request.get_json(silent=True) or {}
         debug_logging = payload.get("debug_logging")
-        with borrow_mqtt() as mqtt:
+        printer_index = _requested_printer_index()
+        with borrow_mqtt(printer_index) as mqtt:
             if not mqtt:
                 return {"error": "Service unavailable"}, 503
             if debug_logging is not None:
@@ -5524,7 +5817,11 @@ if os.getenv("ANKERCTL_DEV_MODE", "false").lower() == "true":
         payload = request.get_json(silent=True) or {}
         event_type = payload.get("type")
         event_payload = payload.get("payload") or {}
-        with borrow_mqtt() as mqtt:
+        printer_index = _requested_printer_index()
+        mqtt_svc = get_mqtt_service(printer_index)
+        if event_type in ("start", "finish", "fail") and mqtt_svc is not None and getattr(mqtt_svc, "is_printing", False):
+            return {"error": "Cannot simulate print lifecycle events while a real print is in progress"}, 409
+        with borrow_mqtt(printer_index) as mqtt:
             if not mqtt:
                 return {"error": "Service unavailable"}, 503
             mqtt.simulate_event(event_type, event_payload)
@@ -5611,15 +5908,23 @@ if os.getenv("ANKERCTL_DEV_MODE", "false").lower() == "true":
 
         Delegates to _read_bed_leveling_grid() for the actual work.
         """
-        data, err = _read_bed_leveling_grid()
+        printer_index = _requested_printer_index()
+        mqtt_svc = get_mqtt_service(printer_index)
+        if mqtt_svc is not None and getattr(mqtt_svc, "is_printing", False):
+            return {"error": "Cannot read bed leveling data while printing"}, 409
+        data, err = _read_bed_leveling_grid(printer_index=printer_index)
         if err is not None:
             return err
         return data
 
     @app.get("/api/debug/printer-report/<name>")
     def app_api_debug_printer_report(name):
+        printer_index = _requested_printer_index()
+        mqtt_svc = get_mqtt_service(printer_index)
+        if mqtt_svc is not None and getattr(mqtt_svc, "is_printing", False):
+            return {"error": "Cannot read printer report while printing"}, 409
         try:
-            return _read_printer_report(name)
+            return _read_printer_report(name, printer_index=printer_index)
         except KeyError:
             return {"error": f"Unknown printer report: {name}"}, 404
         except TimeoutError as exc:
@@ -5677,14 +5982,16 @@ _PROTECTED_GET_PATHS = {
     "/api/history",
     "/api/timelapses",
     "/api/timelapse-snapshots",
+    # Live filename/task/preview_url/progress state, same sensitivity as the
+    # already-protected /api/debug/state and /api/history
+    "/api/printer/runtime-state",
+    # Proxies an outbound HTTP fetch of an externally-influenced preview_url
+    # (see _fetch_remote_image) — unauthenticated access makes this an SSRF
+    # trigger, not just a data leak
+    "/api/files/printer/thumbnail",
 }
 
 # POST endpoints needed for initial printer setup (config import / login)
-_SETUP_PATHS = {
-    "/api/ankerctl/config/upload",
-    "/api/ankerctl/config/login",
-}
-
 # URL path prefixes that send commands to the printer and must be blocked
 # when the active device is not supported (e.g. eufyMake E1 UV printer).
 # Any request whose path starts with one of these prefixes is rejected.
@@ -5716,11 +6023,11 @@ def _block_unsupported_device():
     This guard runs before auth so that the 503 is returned even on
     unauthenticated requests — the device must simply never be commanded.
     Static assets and config/setup paths are always allowed so the UI
-    remains reachable for configuration changes.
+    remains reachable for configuration changes. Scoped to the requested
+    printer_index (not just whichever printer is globally "active"), so a
+    blocked device mixed into the same account doesn't shadow requests for
+    a different, fully-supported printer.
     """
-    if not app.config.get("unsupported_device"):
-        return None
-
     path = request.path
 
     # Always allow static assets
@@ -5729,7 +6036,8 @@ def _block_unsupported_device():
 
     # Block printer-control paths
     if any(path.startswith(prefix) for prefix in _PRINTER_CONTROL_PREFIXES):
-        return jsonify({"error": "Active device is not supported by ankerctl"}), 503
+        if _printer_is_unsupported(printer_index=_requested_printer_index()):
+            return jsonify({"error": "Active device is not supported by ankerctl"}), 503
 
     return None
 
@@ -5761,7 +6069,11 @@ def _check_api_key():
 
     Read-only requests (GET) are allowed without auth so the WebUI
     stays accessible.  The API key is only required for mutations.
-    Setup endpoints are exempted when no printer is configured yet.
+
+    There is no setup-time exemption: if an operator has already configured
+    an API key (env var or config file) before first-run setup, that key is
+    required for the setup endpoints too. If no key is configured at all,
+    the early return above already allows everything, including setup.
     """
     api_key = app.config.get("api_key")
     if not api_key:
@@ -5776,11 +6088,12 @@ def _check_api_key():
     # strip the key from the visible URL and set a session cookie instead.
     # API endpoints and /video are accessed by programmatic clients (HA, ffmpeg,
     # Frigate) that don't persist session cookies across redirects, so skip the
-    # redirect entirely and let the request proceed directly.
+    # redirect entirely and let the request proceed directly.  WebSocket
+    # handshakes never follow redirects, so /ws/* must be exempt too.
     url_key = request.args.get("apikey")
     if url_key and secrets.compare_digest(url_key, api_key):
         session["authenticated"] = True
-        if request.path.startswith("/api/") or request.path == "/video":
+        if request.path.startswith("/api/") or request.path == "/video" or request.path.startswith("/ws/"):
             return None
         from flask import redirect
         params = {key: values for key, values in request.args.lists() if key != "apikey"}
@@ -5799,11 +6112,19 @@ def _check_api_key():
         request.path.startswith("/api/timelapse/")
         or request.path.startswith("/api/timelapse-snapshot/")
     )
-    if request.method in ("GET", "HEAD", "OPTIONS") and request.path not in _PROTECTED_GET_PATHS and not is_debug_path and not is_timelapse_path:
-        return None
-
-    # Allow setup endpoints when no printer is configured yet
-    if not app.config.get("login") and request.path in _SETUP_PATHS:
+    # /api/history/<id>/thumbnail proxies the same outbound preview_url fetch
+    # as /api/files/printer/thumbnail; the id varies so it can't live in
+    # _PROTECTED_GET_PATHS as an exact match.
+    is_history_thumbnail_path = (
+        request.path.startswith("/api/history/") and request.path.endswith("/thumbnail")
+    )
+    if (
+        request.method in ("GET", "HEAD", "OPTIONS")
+        and request.path not in _PROTECTED_GET_PATHS
+        and not is_debug_path
+        and not is_timelapse_path
+        and not is_history_thumbnail_path
+    ):
         return None
 
     # --- From here on, auth is required ---

@@ -330,8 +330,10 @@ def extract_layer_count(data: bytes) -> int | None:
 
     for line in text.splitlines():
         line = line.strip()
+        if not line:
+            continue  # Blank lines (e.g. around thumbnail blocks) don't end the header
         if not line.startswith(";"):
-            break  # Header ends at first non-comment line
+            break  # Header ends at first non-comment content line
         for pattern in _LAYER_COUNT_PATTERNS:
             m = pattern.match(line)
             if m:

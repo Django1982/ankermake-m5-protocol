@@ -1,5 +1,5 @@
 import os
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from web.service.history import PrintHistory
 
@@ -133,6 +133,117 @@ def test_history_clear_and_fallback_finish_latest_active(tmp_path):
 
     history.clear()
     assert history.get_count() == 0
+
+
+def test_clear_preserves_active_entry(tmp_path):
+    history = PrintHistory(db_path=tmp_path / "history.db")
+
+    history.record_start("done.gcode", task_id="t-done")
+    history.record_finish(task_id="t-done", progress=100)
+    active_id = history.record_start("active.gcode", task_id="t-active")
+
+    assert history.has_active_entry() is True
+    history.clear()
+
+    entry = history.get_entry(active_id)
+    assert entry is not None
+    assert entry["status"] == "started"
+    assert history.get_count() == 1
+
+
+def test_clear_with_active_entry_preserves_its_archive_file(tmp_path):
+    history = PrintHistory(db_path=tmp_path / "history.db")
+
+    done_info = history.archive_upload("done.gcode", b"G28\n")
+    done_id = history.record_start(
+        "done.gcode",
+        task_id="t-done",
+        archive_relpath=done_info["archive_relpath"],
+        archive_size=done_info["archive_size"],
+    )
+    history.record_finish(task_id="t-done", progress=100)
+
+    active_info = history.archive_upload("active.gcode", b"G28\nG1 X10\n")
+    active_id = history.record_start(
+        "active.gcode",
+        task_id="t-active",
+        archive_relpath=active_info["archive_relpath"],
+        archive_size=active_info["archive_size"],
+    )
+
+    history.clear()
+
+    assert history.get_entry(done_id) is None
+    archive_path = history.get_archive_path(active_id)
+    assert archive_path is not None
+    assert os.path.exists(archive_path)
+
+
+def test_scoped_clear_preserves_active_entry_for_that_printer(tmp_path):
+    db_path = tmp_path / "history.db"
+    history0 = PrintHistory(db_path=db_path, printer_index=0)
+
+    history0.record_start("done.gcode", task_id="t-done")
+    history0.record_finish(task_id="t-done", progress=100)
+    active_id = history0.record_start("active.gcode", task_id="t-active")
+
+    assert history0.has_active_entry(printer_index=0) is True
+    assert history0.has_active_entry(printer_index=1) is False
+    history0.clear(printer_index=0)
+
+    entry = history0.get_entry(active_id)
+    assert entry is not None
+    assert entry["status"] == "started"
+
+
+def test_prune_never_deletes_active_entry_past_retention(tmp_path):
+    history = PrintHistory(db_path=tmp_path / "history.db", retention_days=1)
+
+    active_id = history.record_start("long-print.gcode", task_id="t-long")
+    old_started = (datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(days=5)).isoformat()
+    with history._connect() as conn:
+        conn.execute("UPDATE print_history SET started_at=? WHERE id=?", (old_started, active_id))
+
+    history._prune()
+
+    assert history.get_entry(active_id) is not None
+
+
+def test_prune_via_other_printer_does_not_delete_active_entry(tmp_path):
+    db_path = tmp_path / "history.db"
+    history_a = PrintHistory(db_path=db_path, printer_index=0, retention_days=1)
+    history_b = PrintHistory(db_path=db_path, printer_index=1, retention_days=1)
+
+    active_id = history_a.record_start("long-print.gcode", task_id="a-task")
+    old_started = (datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(days=5)).isoformat()
+    with history_a._connect() as conn:
+        conn.execute("UPDATE print_history SET started_at=? WHERE id=?", (old_started, active_id))
+
+    history_b.record_start("other.gcode", task_id="b-task")
+    # record_start fires _prune() in a background thread; call it directly for determinism
+    history_b._prune()
+
+    assert history_a.get_entry(active_id) is not None
+    entry = history_a.get_entry(active_id)
+    assert entry["status"] == "started"
+
+
+def test_prune_max_entries_preserves_active_entry(tmp_path):
+    history = PrintHistory(db_path=tmp_path / "history.db", max_entries=2)
+
+    active_id = history.record_start("active.gcode", task_id="t-active")
+    with history._connect() as conn:
+        for i in range(3):
+            conn.execute(
+                "INSERT INTO print_history (filename, status, started_at) VALUES (?, 'finished', ?)",
+                (f"newer-{i}.gcode", datetime.now(timezone.utc).replace(tzinfo=None).isoformat()),
+            )
+
+    history._prune()
+
+    entry = history.get_entry(active_id)
+    assert entry is not None
+    assert entry["status"] == "started"
 
 
 def test_printer_scoped_history_includes_legacy_rows_in_view_and_count(tmp_path):
@@ -277,6 +388,7 @@ def test_history_clear_removes_archived_gcode_files(tmp_path):
         archive_relpath=archive_info["archive_relpath"],
         archive_size=archive_info["archive_size"],
     )
+    history.record_finish(filename="cube.gcode")
     assert history.get_archive_path(row_id) is not None
 
     history.clear()

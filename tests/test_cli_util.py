@@ -105,6 +105,12 @@ def test_extract_layer_count_reads_header_and_falls_back_to_markers():
     assert extract_layer_count(fallback) == 2
 
 
+def test_extract_layer_count_survives_blank_lines_in_header():
+    data = b"; thumbnail begin\n; thumbnail end\n\n;LAYER_COUNT:17\nG28\n"
+
+    assert extract_layer_count(data) == 17
+
+
 def test_extract_filament_info_reads_orca_slicer_footer():
     data = (
         b"G28\n"

@@ -7,6 +7,8 @@ import sqlite3
 import threading
 import logging
 
+from cli.model import HOTEND_ALL_METAL_NOZZLE_MAX_C, HOTEND_BED_MAX_C
+
 log = logging.getLogger(__name__)
 
 # Fields that are displayed in the UI and must be sanitized against XSS
@@ -34,6 +36,30 @@ def _normalize_required_name(value):
     if not value:
         raise ValueError("name is required")
     return value
+
+
+# Profiles are printer-agnostic, so validate against the most permissive
+# hardware ceiling (all-metal hotend). The per-printer ceiling is enforced
+# at apply/preheat/swap time in the web routes.
+_TEMP_BOUNDS = {
+    "nozzle_temp_other_layer": (0, HOTEND_ALL_METAL_NOZZLE_MAX_C),
+    "nozzle_temp_first_layer": (0, HOTEND_ALL_METAL_NOZZLE_MAX_C),
+    "bed_temp_other_layer": (0, HOTEND_BED_MAX_C),
+    "bed_temp_first_layer": (0, HOTEND_BED_MAX_C),
+}
+
+
+def _validate_temps(safe):
+    """Reject out-of-range temperature fields present in the input dict."""
+    for field, (low, high) in _TEMP_BOUNDS.items():
+        if field not in safe or safe[field] is None:
+            continue
+        try:
+            value = int(safe[field])
+        except (TypeError, ValueError):
+            raise ValueError(f"{field} must be a number")
+        if value < low or value > high:
+            raise ValueError(f"{field} must be between {low} and {high}")
 
 
 _SCHEMA = """
@@ -442,6 +468,7 @@ class FilamentStore:
             if field in safe:
                 safe[field] = _sanitize_text(safe[field])
         safe["name"] = _normalize_required_name(safe.get("name"))
+        _validate_temps(safe)
         cols = ", ".join(safe.keys())
         placeholders = ", ".join("?" for _ in safe)
         with self._lock:
@@ -469,6 +496,7 @@ class FilamentStore:
                 safe[field] = _sanitize_text(safe[field])
         if "name" in safe:
             safe["name"] = _normalize_required_name(safe["name"])
+        _validate_temps(safe)
         if not safe:
             return self.get(profile_id)
         assignments = ", ".join(f"{k} = ?" for k in safe)

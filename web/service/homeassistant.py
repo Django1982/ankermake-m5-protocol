@@ -99,42 +99,60 @@ class HomeAssistantService:
         cfg = config.home_assistant
         new_enabled = cfg.get("enabled", False)
         new_host = cfg.get("mqtt_host", _DEFAULT_HOST)
-        new_port = int(cfg.get("mqtt_port", _DEFAULT_PORT))
+        try:
+            new_port = int(cfg.get("mqtt_port", _DEFAULT_PORT))
+        except (TypeError, ValueError) as err:
+            log.warning(
+                f"HA MQTT: invalid mqtt_port in config ({err!r}), keeping current port {self._port}"
+            )
+            new_port = self._port
         new_user = cfg.get("mqtt_username", "")
         new_password = cfg.get("mqtt_password", "")
         new_discovery_prefix = cfg.get("discovery_prefix", _DEFAULT_DISCOVERY_PREFIX)
         # topic prefix is not in config model yet? Defaults to ankerctl
         new_topic_prefix = os.getenv("HA_MQTT_TOPIC_PREFIX", _DEFAULT_TOPIC_PREFIX)
 
-        # check if restart needed
-        need_restart = False
-        if self._client: # Only if currently running
-            if (self._host != new_host or 
-                self._port != new_port or 
-                self._user != new_user or 
-                self._password != new_password or
-                self._discovery_prefix != new_discovery_prefix or
-                self._topic_prefix != new_topic_prefix):
-                need_restart = True
-            if self._enabled and not new_enabled:
-                self.stop() # Just stop
-                need_restart = False
+        # Decide what action to take under the lock, but perform the actual
+        # stop()/start() calls after releasing it — those methods acquire
+        # self._lock themselves and it is a plain Lock, not reentrant.
+        with self._lock:
+            need_restart = False
+            action = None
+            if self._client:  # Only if currently running
+                if (self._host != new_host or
+                    self._port != new_port or
+                    self._user != new_user or
+                    self._password != new_password or
+                    self._discovery_prefix != new_discovery_prefix or
+                    self._topic_prefix != new_topic_prefix):
+                    need_restart = True
+                if self._enabled and not new_enabled:
+                    action = "stop"
+                    need_restart = False
 
-        self._enabled = new_enabled
-        self._host = new_host
-        self._port = new_port
-        self._user = new_user
-        self._password = new_password
-        self._discovery_prefix = new_discovery_prefix
-        self._topic_prefix = new_topic_prefix
-        # Env vars take precedence over config file values
-        self._ha_base_url = (os.getenv("HA_BASE_URL") or cfg.get("ha_base_url", "")).rstrip("/")
-        self._ha_token = os.getenv("HA_TOKEN") or cfg.get("ha_token", "")
+            self._enabled = new_enabled
+            self._host = new_host
+            self._port = new_port
+            self._user = new_user
+            self._password = new_password
+            self._discovery_prefix = new_discovery_prefix
+            self._topic_prefix = new_topic_prefix
+            # Env vars take precedence over config file values
+            self._ha_base_url = (os.getenv("HA_BASE_URL") or cfg.get("ha_base_url", "")).rstrip("/")
+            self._ha_token = os.getenv("HA_TOKEN") or cfg.get("ha_token", "")
 
-        if need_restart and self._enabled:
+            if action is None:
+                if need_restart and self._enabled:
+                    action = "restart"
+                elif self._enabled and not self._client:
+                    action = "start"
+
+        if action == "stop":
+            self.stop()
+        elif action == "restart":
             self.stop()
             self.start()
-        elif self._enabled and not self._client:
+        elif action == "start":
             self.start()
 
     @property
@@ -154,66 +172,68 @@ class HomeAssistantService:
         integration. paho's background thread retries with exponential
         backoff.
         """
-        if not self._enabled:
-            return
-        if self._client:
-            return
+        with self._lock:
+            if not self._enabled:
+                return
+            if self._client:
+                return
 
-        log.info(f"HA MQTT: connecting to {self._host}:{self._port}")
-        if hasattr(paho_mqtt, "CallbackAPIVersion"):
-            self._client = paho_mqtt.Client(paho_mqtt.CallbackAPIVersion.VERSION1, client_id=f"ankerctl-{self._printer_sn}", clean_session=True)
-        else:
-            self._client = paho_mqtt.Client(client_id=f"ankerctl-{self._printer_sn}", clean_session=True)
+            log.info(f"HA MQTT: connecting to {self._host}:{self._port}")
+            if hasattr(paho_mqtt, "CallbackAPIVersion"):
+                self._client = paho_mqtt.Client(paho_mqtt.CallbackAPIVersion.VERSION1, client_id=f"ankerctl-{self._printer_sn}", clean_session=True)
+            else:
+                self._client = paho_mqtt.Client(client_id=f"ankerctl-{self._printer_sn}", clean_session=True)
 
-        if self._user:
-            self._client.username_pw_set(self._user, self._password)
+            if self._user:
+                self._client.username_pw_set(self._user, self._password)
 
-        self._client.on_connect = self._on_connect
-        self._client.on_disconnect = self._on_disconnect
-        self._client.on_message = self._on_message
+            self._client.on_connect = self._on_connect
+            self._client.on_disconnect = self._on_disconnect
+            self._client.on_message = self._on_message
 
-        # Bound reconnect backoff so brief broker outages recover quickly
-        # but sustained unreachability doesn't hammer the network.
-        self._client.reconnect_delay_set(min_delay=1, max_delay=60)
+            # Bound reconnect backoff so brief broker outages recover quickly
+            # but sustained unreachability doesn't hammer the network.
+            self._client.reconnect_delay_set(min_delay=1, max_delay=60)
 
-        # Set LWT (Last Will and Testament) so HA marks device offline
-        avail_topic = self._availability_topic()
-        self._client.will_set(avail_topic, payload="offline", qos=1, retain=True)
+            # Set LWT (Last Will and Testament) so HA marks device offline
+            avail_topic = self._availability_topic()
+            self._client.will_set(avail_topic, payload="offline", qos=1, retain=True)
 
-        try:
-            self._client.connect_async(self._host, self._port, keepalive=60)
-        except ValueError as err:
-            # Invalid host/port syntax — genuine misconfiguration.
-            log.error(f"HA MQTT: invalid broker configuration: {err}")
-            self._client = None
-            return
-        except OSError as err:
-            # Broker unreachable right now (ConnectionRefused, NetworkUnreachable, etc.).
-            # Log a warning but proceed to loop_start() so paho retries automatically.
-            log.warning(f"HA MQTT: initial connect failed ({err}), will retry via background loop")
+            try:
+                self._client.connect_async(self._host, self._port, keepalive=60)
+            except ValueError as err:
+                # Invalid host/port syntax — genuine misconfiguration.
+                log.error(f"HA MQTT: invalid broker configuration: {err}")
+                self._client = None
+                return
+            except OSError as err:
+                # Broker unreachable right now (ConnectionRefused, NetworkUnreachable, etc.).
+                # Log a warning but proceed to loop_start() so paho retries automatically.
+                log.warning(f"HA MQTT: initial connect failed ({err}), will retry via background loop")
 
-        self._client.loop_start()
+            self._client.loop_start()
 
     def stop(self):
         """Disconnect from the HA MQTT broker and mark device offline."""
-        self._unregister_ha_mjpeg_camera()
+        with self._lock:
+            self._unregister_ha_mjpeg_camera()
 
-        if not self._client:
-            return
+            if not self._client:
+                return
 
-        self._stop_event.set()
-        if self._availability_thread and self._availability_thread.is_alive():
-            self._availability_thread.join(timeout=5)
+            self._stop_event.set()
+            if self._availability_thread and self._availability_thread.is_alive():
+                self._availability_thread.join(timeout=5)
 
-        try:
-            self._publish(self._availability_topic(), "offline", retain=True)
-            self._client.disconnect()
-            self._client.loop_stop()
-        except Exception as err:
-            log.warning(f"HA MQTT: disconnect error: {err}")
-        finally:
-            self._client = None
-            self._connected = False
+            try:
+                self._publish(self._availability_topic(), "offline", retain=True)
+                self._client.disconnect()
+                self._client.loop_stop()
+            except Exception as err:
+                log.warning(f"HA MQTT: disconnect error: {err}")
+            finally:
+                self._client = None
+                self._connected = False
 
     # ------------------------------------------------------------------
     # Callbacks
@@ -570,7 +590,15 @@ class HomeAssistantService:
         flask_port = os.getenv("FLASK_PORT") or "4470"
 
         params = f"printer_index={self._printer_index}"
-        api_key = os.getenv("ANKERCTL_API_KEY", "")
+        # app.config["api_key"] holds the resolved key (env var or config file);
+        # the env var alone misses keys set via the Setup UI / config set-password.
+        try:
+            import web
+
+            api_key = web.app.config.get("api_key") or ""
+        except Exception:
+            api_key = ""
+        api_key = api_key or os.getenv("ANKERCTL_API_KEY", "")
         if api_key:
             params += f"&apikey={api_key}"
 
@@ -627,7 +655,7 @@ class HomeAssistantService:
             return
         if isinstance(entries, list):
             for entry in entries:
-                if entry.get("domain") == "mjpeg" and "ankerctl" in entry.get("title", ""):
+                if entry.get("domain") == "mjpeg" and entry.get("title", "") == camera_name:
                     self._ha_mjpeg_entry_id = entry.get("entry_id")
                     log.debug(f"HA REST: existing MJPEG camera entry found ({self._ha_mjpeg_entry_id}), skipping")
                     return

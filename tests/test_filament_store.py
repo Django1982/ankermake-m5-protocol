@@ -56,6 +56,40 @@ def test_filament_store_requires_name(tmp_path):
         store.update(created["id"], {"name": "   "})
 
 
+def test_filament_store_rejects_out_of_range_temperatures(tmp_path):
+    store = FilamentStore(tmp_path / "filaments.db")
+
+    with pytest.raises(ValueError, match="nozzle_temp_other_layer"):
+        store.create({"name": "Bad", "nozzle_temp_other_layer": 999999})
+    with pytest.raises(ValueError, match="bed_temp_other_layer"):
+        store.create({"name": "Bad", "bed_temp_other_layer": 200})
+    with pytest.raises(ValueError, match="nozzle_temp_first_layer"):
+        store.create({"name": "Bad", "nozzle_temp_first_layer": -5})
+
+    created = store.create({"name": "Good", "nozzle_temp_other_layer": 220, "bed_temp_other_layer": 60})
+    with pytest.raises(ValueError, match="nozzle_temp_other_layer"):
+        store.update(created["id"], {"nozzle_temp_other_layer": 999999})
+    with pytest.raises(ValueError, match="bed_temp_first_layer"):
+        store.update(created["id"], {"bed_temp_first_layer": 131})
+
+    updated = store.update(created["id"], {"nozzle_temp_other_layer": 300, "bed_temp_other_layer": 100})
+    assert updated["nozzle_temp_other_layer"] == 300
+    assert updated["bed_temp_other_layer"] == 100
+
+
+def test_filament_store_rejects_temps_above_all_metal_ceiling(tmp_path):
+    store = FilamentStore(tmp_path / "filaments.db")
+
+    with pytest.raises(ValueError, match="nozzle_temp_other_layer"):
+        store.create({"name": "Too Hot", "nozzle_temp_other_layer": 301})
+    with pytest.raises(ValueError, match="bed_temp_other_layer"):
+        store.create({"name": "Too Hot", "bed_temp_other_layer": 101})
+
+    created = store.create({"name": "Boundary", "nozzle_temp_other_layer": 300, "bed_temp_other_layer": 100})
+    assert created["nozzle_temp_other_layer"] == 300
+    assert created["bed_temp_other_layer"] == 100
+
+
 def test_filament_store_migrates_legacy_columns(tmp_path):
     db_path = tmp_path / "legacy_filaments.db"
     conn = sqlite3.connect(db_path)

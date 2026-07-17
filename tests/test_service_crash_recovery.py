@@ -208,30 +208,6 @@ class TestPartialUploadRecovery:
         pass
 
 
-class TestVideoServiceStallRecovery:
-    """Test VideoQueue stall detection and recovery"""
-
-    @patch('web.service.video.VideoQueue')
-    def test_video_stall_detection_triggers_soft_restart(self, mock_vq):
-        """No frames past the configured timeout triggers soft restart"""
-        from web.service.video import VideoQueue, _STALL_TIMEOUT
-
-        vq = VideoQueue()
-        vq.last_frame_at = time.time() - (_STALL_TIMEOUT + 1)
-
-        # worker_run should detect stall
-        # (Implementation-specific: check actual stall detection logic)
-        pass
-
-    def test_video_three_consecutive_failures_trigger_hard_restart(self):
-        """3 consecutive soft restart failures trigger ServiceRestartSignal"""
-        from web.service.video import _STALL_MAX_RETRIES
-
-        # Simulate 3 consecutive stall detections
-        # Should raise ServiceRestartSignal on 3rd failure
-        pass
-
-
 class TestServiceDependencyFailure:
     """Test service behavior when dependencies fail"""
 

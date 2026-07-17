@@ -126,6 +126,31 @@ def test_config_manager_round_trips_serialized_config(tmp_path):
     assert loaded.printers[0].mqtt_key == b"\x01\x02"
 
 
+def test_config_manager_load_recovers_from_corrupt_json(tmp_path):
+    dirs = SimpleNamespace(user_config_path=tmp_path)
+    manager = AnkerConfigManager(dirs, classes=(Config, Account, Printer))
+    (tmp_path / "default.json").write_text('{"account": {"__type__": "Account", "auth_token"')
+
+    loaded = manager.load("default", "fallback-value")
+
+    assert loaded == "fallback-value"
+    remaining = list(tmp_path.iterdir())
+    assert not (tmp_path / "default.json").exists()
+    assert any(p.name.startswith("default.json.corrupt-") for p in remaining)
+
+
+def test_config_manager_save_is_atomic_and_leaves_no_tmp_file(tmp_path):
+    dirs = SimpleNamespace(user_config_path=tmp_path)
+    manager = AnkerConfigManager(dirs, classes=(Config, Account, Printer))
+    manager.save("default", _sample_config(upload_rate_mbps=10))
+
+    manager.save("default", _sample_config(upload_rate_mbps=99))
+
+    reloaded = manager.load("default", None)
+    assert reloaded.upload_rate_mbps == 99
+    assert [p.name for p in tmp_path.iterdir()] == ["default.json"]
+
+
 def test_logincache_load_parses_eufymake_webview_blob():
     token = "f88b0074484d9fd9dfcda327ef2b4dd28b4511235c0514df"
     token_fragment = base64.b64encode(f"{token}%".encode()).decode().rstrip("=")

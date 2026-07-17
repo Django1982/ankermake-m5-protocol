@@ -78,13 +78,24 @@ class BaseConfigManager:
         if not path.exists():
             return default
 
-        with path.open() as f:
-            return json.load(f, object_hook=self._load_json)
+        try:
+            with path.open() as f:
+                return json.load(f, object_hook=self._load_json)
+        except (json.JSONDecodeError, UnicodeDecodeError) as err:
+            corrupt_path = path.with_name(f"{path.name}.corrupt-{int(datetime.now().timestamp())}")
+            log.critical(f"Config file {path} is corrupt ({err}); moving aside to {corrupt_path} and using defaults")
+            try:
+                path.rename(corrupt_path)
+            except OSError as rename_err:
+                log.critical(f"Failed to move aside corrupt config file {path}: {rename_err}")
+            return default
 
     def save(self, name, value):
         path = self.config_path(name)
-        path.write_text(json.dumps(value, default=self._save_json, indent=2) + "\n")
-        path.chmod(0o600)
+        tmp_path = path.with_name(f"{path.name}.tmp-{os.getpid()}")
+        tmp_path.write_text(json.dumps(value, default=self._save_json, indent=2) + "\n")
+        tmp_path.chmod(0o600)
+        os.replace(tmp_path, path)
 
 
 class AnkerConfigManager(BaseConfigManager):

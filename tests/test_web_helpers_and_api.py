@@ -4,6 +4,8 @@ from datetime import datetime
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
+
 from cli.model import Account, Config, Printer
 from libflagship import resolve_root_dir
 from web import _AccessLogNoiseFilter, _ConsoleLogBuffer, _PrinterAlertBuffer
@@ -18,11 +20,13 @@ from web import (
     _filament_service_length,
     _filament_service_temp,
     _format_signed_mm,
+    _hotend_nozzle_max_c,
     _probe_printer_storage_files,
     _parse_z_offset_mm,
     _resolve_apprise,
     _safe_same_site_redirect_target,
     _serialize_z_offset_state,
+    _set_printer_z_offset,
     _z_offset_mm_to_steps,
     _z_offset_steps_to_mm,
     app,
@@ -96,6 +100,37 @@ def test_filament_and_z_offset_helpers():
     assert _format_signed_mm(-0.12) == "-0.12"
     assert _parse_z_offset_mm({"offset": "0.456"}, "offset") == 0.46
     assert _serialize_z_offset_state({"steps": 25, "source": "mqtt"})["display"] == "0.25 mm"
+
+
+def test_hotend_nozzle_max_defaults_to_standard():
+    cfg = Config(
+        account=Account(auth_token="token", region="eu", user_id="user-1", email="user@example.com"),
+        printers=[_printer("SN1", "Printer")],
+    )
+
+    assert _hotend_nozzle_max_c(cfg, printer_index=0) == 260
+
+
+def test_hotend_nozzle_max_returns_all_metal_when_enabled():
+    cfg = Config(
+        account=Account(auth_token="token", region="eu", user_id="user-1", email="user@example.com"),
+        printers=[_printer("SN1", "Printer")],
+    )
+    cfg.filament_service["per_printer"]["SN1"] = {"all_metal_hotend": True}
+
+    assert _hotend_nozzle_max_c(cfg, printer_index=0) == 300
+    # Unresolvable printer index falls back to the safer standard ceiling.
+    assert _hotend_nozzle_max_c(cfg, printer_index=5) == 260
+
+
+def test_set_printer_z_offset_rejects_out_of_range_targets():
+    # Bound check must fire before any MQTT interaction, so a bare
+    # namespace without refresh/send methods is enough here.
+    mqtt = SimpleNamespace()
+    with pytest.raises(ValueError):
+        _set_printer_z_offset(mqtt, 50.0)
+    with pytest.raises(ValueError):
+        _set_printer_z_offset(mqtt, -50.0)
 
 
 def test_resolve_apprise_drops_progress_max_value():
@@ -443,6 +478,120 @@ def test_api_console_logs_returns_recent_entries(monkeypatch):
     assert response.status_code == 200
     assert response.get_json()["entries"] == [{"id": 42, "text": "[*] printer ready"}]
     assert calls == [(25, 10)]
+
+
+def test_switch_active_printer_locked_by_env_var_returns_403():
+    cfg = Config(
+        account=Account(auth_token="token", region="eu", user_id="user-1", email="user@example.com"),
+        printers=[_printer("SN1", "Printer One"), _printer("SN2", "Printer Two")],
+    )
+    manager = FakeConfigManager(cfg)
+    client = app.test_client()
+
+    old_values = {
+        "config": app.config.get("config"),
+        "printer_index": app.config.get("printer_index"),
+        "printer_index_locked": app.config.get("printer_index_locked"),
+        "login": app.config.get("login"),
+        "api_key": app.config.get("api_key"),
+    }
+    app.config["config"] = manager
+    app.config["printer_index"] = 0
+    app.config["printer_index_locked"] = True
+    app.config["login"] = True
+    app.config["api_key"] = "secret-key-123456"
+
+    try:
+        resp = client.post(
+            "/api/printers/active",
+            json={"index": 1},
+            headers={"X-Api-Key": "secret-key-123456"},
+        )
+        assert resp.status_code == 403
+        assert app.config["printer_index"] == 0
+        assert cfg.active_printer_index != 1
+    finally:
+        for key, value in old_values.items():
+            app.config[key] = value
+
+
+def test_switch_active_printer_to_unsupported_model_returns_403():
+    cfg = Config(
+        account=Account(auth_token="token", region="eu", user_id="user-1", email="user@example.com"),
+        printers=[_printer("SN1", "Printer One"), _printer("SN2", "UV Printer", model="V8260")],
+    )
+    manager = FakeConfigManager(cfg)
+    services = FakeServices()
+    client = app.test_client()
+
+    old_values = {
+        "config": app.config.get("config"),
+        "printer_index": app.config.get("printer_index"),
+        "printer_index_locked": app.config.get("printer_index_locked"),
+        "video_supported": app.config.get("video_supported"),
+        "login": app.config.get("login"),
+        "unsupported_device": app.config.get("unsupported_device"),
+        "api_key": app.config.get("api_key"),
+    }
+    old_svc = app.svc
+    app.config["config"] = manager
+    app.config["printer_index"] = 0
+    app.config["printer_index_locked"] = False
+    app.config["video_supported"] = True
+    app.config["login"] = True
+    app.config["unsupported_device"] = False
+    app.config["api_key"] = "secret-key-123456"
+    app.svc = services
+
+    try:
+        resp = client.post(
+            "/api/printers/active",
+            json={"index": 1},
+            headers={"X-Api-Key": "secret-key-123456"},
+        )
+        assert resp.status_code == 403
+        assert app.config["printer_index"] == 0
+        assert cfg.active_printer_index != 1
+    finally:
+        app.svc = old_svc
+        for key, value in old_values.items():
+            app.config[key] = value
+
+
+def test_unsupported_device_gate_is_scoped_to_requested_printer_index():
+    """Regression: /api/printer/* must gate on the printer_index a request
+    targets, not just whichever printer is globally "active". A blocked
+    device (e.g. a eufyMake E1 mixed into the same account) must not shadow
+    requests for a different, fully-supported printer."""
+    cfg = Config(
+        account=Account(auth_token="token", region="eu", user_id="user-1", email="user@example.com"),
+        printers=[_printer("SN1", "UV Printer", model="V8260"), _printer("SN2", "Printer Two")],
+    )
+    manager = FakeConfigManager(cfg)
+    client = app.test_client()
+
+    old_values = {
+        "config": app.config.get("config"),
+        "printer_index": app.config.get("printer_index"),
+        "login": app.config.get("login"),
+        "unsupported_device": app.config.get("unsupported_device"),
+        "api_key": app.config.get("api_key"),
+    }
+    app.config["config"] = manager
+    app.config["printer_index"] = 0  # active printer is the unsupported one
+    app.config["login"] = True
+    app.config["unsupported_device"] = True
+    app.config["api_key"] = None
+
+    try:
+        blocked = client.get("/api/printer/alerts")
+        allowed = client.get("/api/printer/alerts?printer_index=1")
+
+        assert blocked.status_code == 503
+        assert allowed.status_code == 200
+    finally:
+        for key, value in old_values.items():
+            app.config[key] = value
 
 
 def test_api_printers_and_switch_active_printer(monkeypatch):
