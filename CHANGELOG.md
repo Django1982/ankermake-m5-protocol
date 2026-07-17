@@ -67,6 +67,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.11.0] - 2026-07-17
+
+### Added
+ - Fan speed (part-cooling) shown on the Home page print status card, sourced from MQTT command 1005 and exposed through Home Assistant discovery
+ - Per-printer "All-Metal Hotend" setting (Setup → Printer) that raises the nozzle temperature ceiling from the stock 260°C to 300°C; bed ceiling is 100°C either way
+
+### Fixed
+ - Nozzle/bed temperature bounds corrected to the real AnkerMake M5 spec — previous limits were untested placeholder guesses
+ - GCode upload could fail or hang indefinitely while the camera/video stream was active, requiring four rounds of live-hardware retesting to fully resolve: connect timeout too short under real load, an unbounded hang in the file-transfer handshake, the printer never being told a released video session had ended (so it held its one session slot until its own internal timeout), and an intermittent single-packet drop on the first handshake packet after a fast reconnect
+ - Filament type/vendor metadata reverted to "unknown" shortly after print start on a transient MQTT reconnect (e.g. brief WiFi hiccup) — it has no telemetry source to self-heal from, unlike other print-state fields
+ - Z-offset input had no bounds check at all; now clamped to ±2mm
+ - Print history clear/auto-prune could delete the database record and archived GCode file of an actively printing job
+ - A single malformed Home Assistant `mqtt_port` value could permanently hang the entire MQTT service
+ - HA MJPEG camera duplicate-prevention check could never fire, registering a duplicate entity on every reconnect
+ - Saved bed-leveling grids had no per-printer scoping; "load last" could silently show another printer's mesh
+ - Race condition in the shared service-restart path could leave any background service (video, PPPP, timelapse, ...) permanently stopped after overlapping restart requests
+ - Filament profile nozzle temperature had no upper bound in 3 of 4 code paths
+ - API key leaked via ffmpeg process arguments on every timelapse snapshot capture
+
+### Security
+ - Removed setup-path exemption that let a pre-configured API key bypass auth on setup endpoints
+ - `auth_token`/`dsk_key`/`mqtt_key` no longer logged unredacted at DEBUG level
+ - `login.json` import now caps upload size instead of accepting arbitrarily large files
+ - Config writes are now atomic — a crash mid-write can no longer corrupt `default.json`
+
 ## [1.10.10] - 2026-06-09
 
 ### Fixed

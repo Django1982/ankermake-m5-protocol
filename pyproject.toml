@@ -1,6 +1,6 @@
 [project]
 name = "ankerctl"
-version = "0.9.1"
+version = "1.11.0"
 description = "CLI and web UI for AnkerMake M5 3D printers"
 readme = "README.md"
 license = {text = "GPL-3.0-only"}
