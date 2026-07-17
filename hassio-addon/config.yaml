@@ -1,5 +1,5 @@
 name: ankerctl
-version: "1.10.10"
+version: "1.11.0"
 slug: ankerctl
 description: Web UI and control interface for AnkerMake M5 3D printers
 url: https://github.com/Django1982/ankermake-m5-protocol
