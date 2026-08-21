@@ -67,6 +67,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.11.1] - 2026-08-21
+
+### Dependencies
+ - `pip` 26.1.2 → 26.2.1
+ - `platformdirs` 4.10.0 → 4.11.3
+ - `setuptools` 83.0.0 → 84.0.0
+ - `tqdm` 4.68.3 → 4.70.0
+ - `docker/login-action` 4.4.0 → 4.5.1
+ - `actions/setup-python` 6 → 7
+
 ## [1.11.0] - 2026-07-17
 
 ### Added
