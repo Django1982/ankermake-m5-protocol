@@ -32,10 +32,10 @@ jobs:
           password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Docker Setup QEMU
-        uses: docker/setup-qemu-action@v4.2.0
+        uses: docker/setup-qemu-action@v4.4.0
 
       - name: Docker Setup Buildx
-        uses: docker/setup-buildx-action@v4.3.0
+        uses: docker/setup-buildx-action@v4.4.1
         with:
           version: latest
           install: true
@@ -51,7 +51,7 @@ jobs:
             type=semver,pattern={{version}}
 
       - name: Build and push Docker images
-        uses: docker/build-push-action@v7.3.0
+        uses: docker/build-push-action@v7.4.0
         with:
           context: .
           file: Dockerfile
@@ -82,10 +82,10 @@ jobs:
           password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Docker Setup QEMU
-        uses: docker/setup-qemu-action@v4.2.0
+        uses: docker/setup-qemu-action@v4.4.0
 
       - name: Docker Setup Buildx
-        uses: docker/setup-buildx-action@v4.3.0
+        uses: docker/setup-buildx-action@v4.4.1
         with:
           version: latest
           install: true
@@ -107,7 +107,7 @@ jobs:
           echo "image_lc=$(echo '${{ env.IMAGE_NAME }}' | tr '[:upper:]' '[:lower:]')" >> $GITHUB_OUTPUT
 
       - name: Build and push HA Supervisor addon image
-        uses: docker/build-push-action@v7.3.0
+        uses: docker/build-push-action@v7.4.0
         with:
           context: hassio-addon
           file: hassio-addon/Dockerfile
