@@ -29,7 +29,6 @@ def _configure_udp_socket(sock, *, broadcast=False, local_port=None):
     for opt_name, value in (
         ("SO_RCVBUF", PPPP_SOCKET_RCVBUF),
         ("SO_SNDBUF", PPPP_SOCKET_SNDBUF),
-        ("SO_REUSEADDR", 1),
     ):
         opt = getattr(socket, opt_name, None)
         if opt is None:
@@ -343,6 +342,9 @@ class AnkerPPPPBaseApi(Thread):
         self.sock = sock
         self.duid = duid
         self.addr = addr
+        # Only directed LAN sessions pin the peer IP. Discovery must accept
+        # multiple printers, and WAN sessions retain their relay behavior.
+        self._lan_peer_host = None
 
         self.state = PPPPState.Idle
         self.chans = [Channel(n) for n in range(8)]
@@ -360,11 +362,16 @@ class AnkerPPPPBaseApi(Thread):
 
     @classmethod
     def open_lan(cls, duid, host):
+        peer_host = socket.gethostbyname(host)
         sock = _configure_udp_socket(
             socket.socket(socket.AF_INET, socket.SOCK_DGRAM),
-            local_port=PPPP_LAN_PORT,
+            # Each session/probe needs its own reply port. Sharing 32108 lets
+            # a camera socket consume another printer's upload responses.
+            local_port=0,
         )
-        return cls(sock, duid, addr=(host, PPPP_LAN_PORT))
+        api = cls(sock, duid, addr=(peer_host, PPPP_LAN_PORT))
+        api._lan_peer_host = peer_host
+        return api
 
     @classmethod
     def open_wan(cls, duid, host):
@@ -375,7 +382,7 @@ class AnkerPPPPBaseApi(Thread):
         sock = _configure_udp_socket(
             socket.socket(socket.AF_INET, socket.SOCK_DGRAM),
             broadcast=True,
-            local_port=PPPP_LAN_PORT,
+            local_port=0,
         )
         addr = ("255.255.255.255", PPPP_LAN_PORT)
         return cls(sock, duid=None, addr=addr)
@@ -484,9 +491,20 @@ class AnkerPPPPBaseApi(Thread):
             raise ConnectionError(f"Tried to recv packet in state {self.state}")
 
         prev_timeout = self.sock.gettimeout()
-        self.sock.settimeout(timeout)
+        deadline = None if timeout is None else time.monotonic() + timeout
         try:
-            data, self.addr = self.sock.recvfrom(65535)
+            while True:
+                remaining = None if deadline is None else max(0.0, deadline - time.monotonic())
+                self.sock.settimeout(remaining)
+                data, addr = self.sock.recvfrom(65535)
+                if self._lan_peer_host is None or addr[0] == self._lan_peer_host:
+                    # The selected printer may switch ports after handshake.
+                    # Never let a different printer redirect this session.
+                    self.addr = addr
+                    break
+                log.debug("Ignoring PPPP packet from unexpected LAN peer %s", addr)
+                if deadline is not None and time.monotonic() >= deadline:
+                    raise TimeoutError("Timed out waiting for selected LAN peer")
         except BlockingIOError as e:
             raise TimeoutError("recv would block") from e
         finally:

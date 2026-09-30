@@ -635,28 +635,23 @@ Do not call this during an active print.
 
 ## Firewall / ufw
 
-If you run `ankerctl` on a host with a stateful firewall such as `ufw` (Ubuntu/Debian default), the printer's UDP replies for LAN discovery and PPPP sessions can be silently dropped unless you allow the right ports. Since the fix for [issue #77](https://github.com/Django1982/ankermake-m5-protocol/issues/77), `ankerctl` binds its LAN sockets to predictable local ports, so you only need one or two static rules.
+LAN sessions, IP probes, and discovery each use their own OS-assigned local UDP port. This allows a timelapse on one printer to continue while another printer receives an upload. The remote printer port remains UDP `32108`.
 
-### Required rule (LAN mode)
+Earlier versions bound all LAN sockets to local port `32108` for firewall compatibility. Those sockets could consume each other's replies, so a rule allowing only destination port `32108` no longer covers replies to the current client.
 
-```sh
-sudo ufw allow in proto udp to any port 32108
-```
+### LAN replies and discovery
 
-This single rule covers both:
-
-- the **LAN discovery broadcast** socket (`open_broadcast`, sends to `255.255.255.255:32108`)
-- the **LAN session** socket (`open_lan`, sends to `<printer-ip>:32108`)
-
-Both sockets bind locally to UDP `32108` (`PPPP_LAN_PORT`), so the printer's `PunchPkt` and follow-up replies hit the same port and the rule matches.
-
-### Optional rule (WAN / cloud mode)
-
-The cloud relay socket (`open_wan`) is intentionally left ephemeral so it does not collide with the LAN socket. Cloud responses transit NAT, which tracks the connection regardless of local port, so no extra rule is normally required. Only add the rule below if you have confirmed your environment needs it:
+A stateful firewall normally permits replies to directed LAN requests. Broadcast discovery replies may need an explicit incoming rule. If discovery or connections are blocked, allow incoming UDP from each printer's IP address (replace the example address with your printer's address):
 
 ```sh
-sudo ufw allow in proto udp to any port 32100   # only if needed for WAN mode
+sudo ufw allow in proto udp from 192.168.1.50 to any
 ```
+
+Repeat for each printer. This permits replies to the client's assigned ports while limiting the rule to the specified printer. DHCP reservations help keep these addresses stable. Do not open all incoming UDP from every host just to support discovery.
+
+### WAN / cloud mode
+
+Cloud connections continue to use OS-assigned local ports and send to remote UDP `32100`. Reply traffic is normally covered by stateful firewall rules.
 
 ### Web UI / slicer access
 
@@ -667,9 +662,10 @@ sudo ufw allow in proto tcp to any port 4470
 ```
 
 > **Tip**
-> If LAN discovery still hangs at "Connecting" after enabling these rules, double-check that the printer is on the same broadcast domain (no router/VLAN between the host and the printer) and that no second `ankerctl` instance is already holding port `32108` — the new bind will raise `RuntimeError: PPPP local port 32108 already in use`.
+> If LAN discovery still hangs at "Connecting", check that the printer is on the same broadcast domain (no router/VLAN between the host and the printer) and that the firewall allows replies from that printer. Avoid running multiple ankerctl instances against the same printer; separate local ports do not remove the printer's own session limits.
 
-For the full design rationale and the underlying socket changes in `libflagship/ppppapi.py`, see [`documentation/issue77_code_fix.md`](documentation/issue77_code_fix.md).
+The earlier fixed-port approach is documented for historical context in [`documentation/issue77_code_fix.md`](documentation/issue77_code_fix.md).
+
 
 ## Helpful Links
 

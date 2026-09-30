@@ -17,12 +17,13 @@ from libflagship.pppp import (
     PktDrw,
     PktDrwAck,
     PktLanSearch,
+    PktPunchPkt,
     PktSessionReady,
     Type,
     Version,
     Xzyh,
 )
-from libflagship.ppppapi import AnkerPPPPBaseApi, Channel, FileUploadInfo, PPPP_LAN_PORT, PPPP_SOCKET_RCVBUF, PPPP_SOCKET_SNDBUF
+from libflagship.ppppapi import AnkerPPPPBaseApi, Channel, FileUploadInfo, PPPP_LAN_PORT, PPPP_SOCKET_RCVBUF, PPPP_SOCKET_SNDBUF, PPPPState
 
 
 def _host(addr="192.168.1.25", port=32108):
@@ -212,7 +213,7 @@ def test_pppp_open_configures_udp_socket_buffers(monkeypatch):
         lambda family, kind: created.append(FakeSocket()) or created[-1],
     )
 
-    lan_api = AnkerPPPPBaseApi.open(duid=None, host="127.0.0.1", port=32108)
+    lan_api = AnkerPPPPBaseApi.open_lan(duid=None, host="127.0.0.1")
     broadcast_api = AnkerPPPPBaseApi.open_broadcast()
 
     assert lan_api.addr == ("127.0.0.1", 32108)
@@ -220,8 +221,100 @@ def test_pppp_open_configures_udp_socket_buffers(monkeypatch):
     assert (socket.SOL_SOCKET, socket.SO_RCVBUF, PPPP_SOCKET_RCVBUF) in created[0].calls
     assert (socket.SOL_SOCKET, socket.SO_SNDBUF, PPPP_SOCKET_SNDBUF) in created[0].calls
     assert (socket.SOL_SOCKET, socket.SO_BROADCAST, 1) in created[1].calls
-    assert created[0].binds == []
-    assert created[1].binds == [('', PPPP_LAN_PORT)]
+    assert created[0].binds == [('', 0)]
+    assert created[1].binds == [('', 0)]
+    assert all(opt != socket.SO_REUSEADDR for _, opt, _ in created[0].calls)
+
+
+def test_concurrent_lan_sessions_and_discovery_receive_only_their_own_packets():
+    # Use real UDP sockets, without contacting a printer. The former shared
+    # bind routed both camera and upload replies to just one of these sockets.
+    apis = []
+    try:
+        apis.append(AnkerPPPPBaseApi.open_lan(_duid(), "127.0.0.1"))
+        apis.append(AnkerPPPPBaseApi.open_lan(_duid(), "127.0.0.1"))
+        apis.append(AnkerPPPPBaseApi.open_broadcast())
+        apis.append(AnkerPPPPBaseApi.open_broadcast())
+        ports = [api.sock.getsockname()[1] for api in apis]
+        assert len(set(ports)) == len(apis)
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as printer:
+            for index, api in enumerate(apis):
+                api.state = PPPPState.Connected
+                packet = PktDrw(chan=1, index=index, data=f"reply-{index}".encode())
+                printer.sendto(packet.pack(), ("127.0.0.1", ports[index]))
+            for index, api in enumerate(apis):
+                packet = api.recv(timeout=1.0)
+                assert packet.index == index
+                assert packet.data == f"reply-{index}".encode()
+                with pytest.raises(TimeoutError):
+                    api.recv(timeout=0)
+    finally:
+        for api in apis:
+            api.sock.close()
+
+
+class _PacketSocket:
+    def __init__(self, packets):
+        self.packets = iter(packets)
+        self.timeout = 7.0
+        self.timeouts = []
+
+    def gettimeout(self):
+        return self.timeout
+
+    def settimeout(self, timeout):
+        self.timeout = timeout
+        self.timeouts.append(timeout)
+
+    def recvfrom(self, size):
+        try:
+            return next(self.packets)
+        except StopIteration:
+            raise TimeoutError from None
+
+
+def test_lan_recv_ignores_other_printer_before_parsing_or_redirecting(monkeypatch):
+    peer = "192.168.1.20"
+    sock = _PacketSocket([
+        (b"not even a PPPP packet", ("192.168.1.21", 32108)),
+        (PktLanSearch().pack(), (peer, 32100)),
+    ])
+    monkeypatch.setattr("libflagship.ppppapi._configure_udp_socket", lambda *a, **kw: sock)
+    # Avoid allocating an unused real socket when replacing its configuration.
+    monkeypatch.setattr("libflagship.ppppapi.socket.socket", lambda *a: sock)
+    api = AnkerPPPPBaseApi.open_lan(_duid(), peer)
+    api.state = PPPPState.Connecting
+    assert isinstance(api.recv(timeout=1.0), PktLanSearch)
+    assert api.addr == (peer, 32100)
+    assert sock.timeout == 7.0
+
+
+@pytest.mark.parametrize("timeout", [0, 1.0])
+def test_lan_recv_foreign_packets_do_not_reset_timeout_or_change_peer(monkeypatch, timeout):
+    sock = _PacketSocket([(b"foreign", ("192.168.1.21", 32108))] * 10)
+    api = AnkerPPPPBaseApi(sock, _duid(), ("192.168.1.20", 32108))
+    api._lan_peer_host = "192.168.1.20"
+    api.state = PPPPState.Connecting
+    ticks = iter([0.0, 0.0, 0.6, 0.6, 1.1])
+    monkeypatch.setattr("libflagship.ppppapi.time.monotonic", lambda: next(ticks))
+    with pytest.raises(TimeoutError):
+        api.recv(timeout=timeout)
+    assert api.addr == ("192.168.1.20", 32108)
+    assert sock.timeout == 7.0
+    if timeout:
+        assert sock.timeouts == [1.0, 0.4, 7.0]
+
+
+def test_discovery_recv_accepts_multiple_printers():
+    sock = _PacketSocket([
+        (PktPunchPkt(duid=_duid()).pack(), ("192.168.1.20", 32108)),
+        (PktPunchPkt(duid=_duid()).pack(), ("192.168.1.21", 32108)),
+    ])
+    api = AnkerPPPPBaseApi(sock, None, ("255.255.255.255", PPPP_LAN_PORT))
+    api.state = PPPPState.Connected
+    for peer in ["192.168.1.20", "192.168.1.21"]:
+        assert isinstance(api.recv(timeout=1.0), PktPunchPkt)
+        assert api.addr == (peer, 32108)
 
 
 def test_pppp_remote_close_log_is_rate_limited(monkeypatch):

@@ -1,5 +1,7 @@
 # Fix: Bind PPPP Sockets to Fixed Local Ports (UFW Compatibility)
 
+> **Historical design, superseded:** LAN sessions and discovery now bind to separate OS-assigned local ports. Sharing local UDP 32108 lets one printer’s camera connection consume another printer’s upload replies. Do not reapply the fixed-port changes below. See the current [firewall guidance](../README.md#firewall--ufw) for rules scoped to each printer’s IP.
+
 **Affects:** `libflagship/ppppapi.py`
 **Related issues:** [Django1982/ankermake-m5-protocol#77](https://github.com/Django1982/ankermake-m5-protocol/issues/77) (original Windows report), [Django1982/ankerctl_go_remake#66](https://github.com/Django1982/ankerctl_go_remake/issues/66) (Linux/ufw confirmation)
 **Reference implementation:** Go remake, branch `fix/pppp-bind-fixed-local-port`, file `internal/pppp/client/client.go`
