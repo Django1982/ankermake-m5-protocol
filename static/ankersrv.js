@@ -1667,7 +1667,7 @@ $(function () {
                     statusEl.innerHTML =
                         `<div class="alert alert-info py-1 small mb-0">` +
                         `<div class="d-flex justify-content-between mb-1">` +
-                        `<span>Auto-Leveling… Punkt ${escapeHtml(point)} / ${total}</span>` +
+                        `<span>Auto-Leveling… Point ${escapeHtml(point)} / ${total}</span>` +
                         `<span>${pct}%</span></div>` +
                         `<div class="progress" style="height:6px;">` +
                         `<div class="progress-bar progress-bar-striped progress-bar-animated" ` +

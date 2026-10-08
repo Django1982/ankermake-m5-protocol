@@ -89,6 +89,7 @@
   "setup.autolevel_description":    "Start the automatic bed leveling procedure. The printer will probe multiple points on the print bed to create a compensation mesh.",
   "setup.autolevel_warning":        "Make sure the print bed is clear before starting.",
   "setup.btn_start_autolevel":      "Start Auto-Level",
+  "setup.autolevel_progress":       "Auto-Leveling… Point {point} / {total}",
   "setup.notifications_header":     "Notifications",
   "setup.apprise_enable":           "Enable Apprise notifications",
   "setup.apprise_url_label":        "Apprise server URL",
