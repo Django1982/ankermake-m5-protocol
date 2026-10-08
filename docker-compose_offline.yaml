@@ -32,7 +32,7 @@ services:
       - mosquitto_data:/mosquitto/data
     healthcheck:
       test: ["CMD", "mosquitto_sub", "-h", "127.0.0.1", "-p", "8789",
-             "--insecure", "-t", "$$SYS/broker/uptime", "-C", "1", "-W", "3"]
+             "--insecure", "--cafile", "/mosquitto/certs/ca-cert.pem", "-t", "$$SYS/broker/uptime", "-C", "1", "-W", "3"]
       interval: 30s
       timeout: 5s
       retries: 3
@@ -49,6 +49,11 @@ services:
     env_file:
       - path: .env
         required: false
+    # Pin the broker names to the local Mosquitto so ankerctl never depends on
+    # the host resolver (stale caches / Tailscale DNS can return Anker's real IPs).
+    extra_hosts:
+      - "make-mqtt.ankermake.com:127.0.0.1"
+      - "make-mqtt-eu.ankermake.com:127.0.0.1"
     environment:
       ANKERCTL_MQTT_CA_CERT: /mqtt-certs/ca-cert.pem
     command: ["/app/ankerctl.py", "webserver", "run", "--host", "0.0.0.0"]
