@@ -2,7 +2,7 @@ import sqlite3
 
 import pytest
 
-from web.service.filament import FilamentStore, _DEFAULTS, _sanitize_text
+from web.service.filament import FilamentStore, _ANKERMAKE_DEFAULTS, _DEFAULTS, _sanitize_text
 
 
 def test_sanitize_text_strips_html_tags():
@@ -136,3 +136,34 @@ def test_filament_store_migrates_legacy_columns(tmp_path):
     assert legacy["bed_temp_other_layer"] == 61
     assert "nozzle_temp_first_layer" in legacy
     assert "wipe_speed" in legacy
+
+
+def test_filament_store_migration_adds_ankermake_profiles_once(tmp_path):
+    db_path = tmp_path / "filaments.db"
+    store = FilamentStore(db_path)
+    ankermake = {p["name"] for p in _ANKERMAKE_DEFAULTS}
+    for profile in store.list_all():
+        if profile["name"] in ankermake:
+            store.delete(profile["id"])
+    store.create({"name": "My PLA"})
+    store.close()
+
+    # Simulate an existing v1 store with user profiles.
+    conn = sqlite3.connect(db_path)
+    conn.execute("PRAGMA user_version = 1")
+    conn.commit()
+    conn.close()
+
+    store = FilamentStore(db_path)
+    names = [p["name"] for p in store.list_all()]
+    assert ankermake <= set(names)
+    assert "My PLA" in names
+    assert len(names) == len(_DEFAULTS) + 1
+
+    # A profile the user deletes after the migration stays deleted.
+    basic = next(p for p in store.list_all() if p["name"] == "AnkerMake PLA+ Basic")
+    store.delete(basic["id"])
+    store.close()
+
+    store = FilamentStore(db_path)
+    assert "AnkerMake PLA+ Basic" not in {p["name"] for p in store.list_all()}

@@ -638,7 +638,7 @@ Topics: `<HA_MQTT_TOPIC_PREFIX>/<printer_sn>/state` (JSON), `.../availability`, 
 ### FilamentStore (`web/service/filament.py`)
 
 SQLite filament profiles (`~/.config/ankerctl/filament.db`). Not a `Service` — attached as `app.filaments`.
-Pre-seeded with 4 defaults (PLA, PETG, ABS, TPU). Schema includes: name, brand, material, color,
+Pre-seeded with 4 generics (PLA, PETG, ABS, TPU) plus 5 AnkerMake PLA+ profiles (`_ANKERMAKE_DEFAULTS`, from AnkerMake Studio, stock brass nozzle; added once to existing stores by schema migration v2). Schema includes: name, brand, material, color,
 nozzle/bed temps (first-layer and other-layer), flow rate, diameter, pressure advance, speeds,
 cooling, seam, scarf, retract, wipe settings, and notes.
 Schema auto-migrates on startup (`ALTER TABLE`). Supports: `list_all()`, `get()`, `create()`, `update()`, `delete()`, `duplicate()`.
