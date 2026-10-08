@@ -18,7 +18,7 @@ _TEXT_FIELDS = {"name", "brand", "notes", "material", "color", "seam_position"}
 _SANITIZE_RE = re.compile(r'<[^>]{0,1000}>')
 
 # Schema version — bump when adding columns or new indexes.
-_CURRENT_SCHEMA_VERSION = 1
+_CURRENT_SCHEMA_VERSION = 2
 
 
 def _sanitize_text(value):
@@ -275,6 +275,192 @@ _DEFAULTS = [
     },
 ]
 
+# AnkerMake PLA+ profiles from AnkerMake/eufyMake Studio (stock 0.4 mm brass nozzle).
+# Seeded into new stores with the generics; added once to existing stores by schema migration v2.
+_ANKERMAKE_DEFAULTS = [
+    {
+        "name": "AnkerMake PLA+ Basic",
+        "brand": "AnkerMake",
+        "material": "PLA",
+        "color": "#FFFFFF",
+        "nozzle_temp_other_layer": 200,
+        "nozzle_temp_first_layer": 230,
+        "bed_temp_other_layer": 65,
+        "bed_temp_first_layer": 65,
+        "flow_rate": 1.0,
+        "filament_diameter": 1.75,
+        "pressure_advance": 0.0,
+        "max_volumetric_speed": 22.0,
+        "travel_speed": 150,
+        "perimeter_speed": 60,
+        "infill_speed": 80,
+        "cooling_enabled": 1,
+        "cooling_min_fan_speed": 100,
+        "cooling_max_fan_speed": 100,
+        "seam_position": "aligned",
+        "seam_gap": 0.0,
+        "scarf_enabled": 0,
+        "scarf_conditional": 0,
+        "scarf_angle_threshold": 155,
+        "scarf_length": 20.0,
+        "scarf_steps": 10,
+        "scarf_speed": 100,
+        "retract_length": 0.8,
+        "retract_speed": 60,
+        "retract_lift_z": 0.0,
+        "wipe_enabled": 0,
+        "wipe_distance": 1.5,
+        "wipe_speed": 40,
+        "wipe_retract_before": 0,
+        "notes": "AnkerMake/eufyMake Studio profile, stock 0.4 mm brass nozzle.",
+    },
+    {
+        "name": "AnkerMake PLA+ Matte",
+        "brand": "AnkerMake",
+        "material": "PLA",
+        "color": "#FFFFFF",
+        "nozzle_temp_other_layer": 210,
+        "nozzle_temp_first_layer": 230,
+        "bed_temp_other_layer": 65,
+        "bed_temp_first_layer": 65,
+        "flow_rate": 1.0,
+        "filament_diameter": 1.75,
+        "pressure_advance": 0.0,
+        "max_volumetric_speed": 22.0,
+        "travel_speed": 150,
+        "perimeter_speed": 60,
+        "infill_speed": 80,
+        "cooling_enabled": 1,
+        "cooling_min_fan_speed": 100,
+        "cooling_max_fan_speed": 100,
+        "seam_position": "aligned",
+        "seam_gap": 0.0,
+        "scarf_enabled": 0,
+        "scarf_conditional": 0,
+        "scarf_angle_threshold": 155,
+        "scarf_length": 20.0,
+        "scarf_steps": 10,
+        "scarf_speed": 100,
+        "retract_length": 0.8,
+        "retract_speed": 60,
+        "retract_lift_z": 0.0,
+        "wipe_enabled": 0,
+        "wipe_distance": 1.5,
+        "wipe_speed": 40,
+        "wipe_retract_before": 0,
+        "notes": "AnkerMake/eufyMake Studio profile, stock 0.4 mm brass nozzle.",
+    },
+    {
+        "name": "AnkerMake PLA+ Metallic",
+        "brand": "AnkerMake",
+        "material": "PLA",
+        "color": "#ACAC8A",
+        "nozzle_temp_other_layer": 200,
+        "nozzle_temp_first_layer": 220,
+        "bed_temp_other_layer": 60,
+        "bed_temp_first_layer": 60,
+        "flow_rate": 1.0,
+        "filament_diameter": 1.75,
+        "pressure_advance": 0.0,
+        "max_volumetric_speed": 20.0,
+        "travel_speed": 150,
+        "perimeter_speed": 60,
+        "infill_speed": 80,
+        "cooling_enabled": 1,
+        "cooling_min_fan_speed": 100,
+        "cooling_max_fan_speed": 100,
+        "seam_position": "aligned",
+        "seam_gap": 0.0,
+        "scarf_enabled": 0,
+        "scarf_conditional": 0,
+        "scarf_angle_threshold": 155,
+        "scarf_length": 20.0,
+        "scarf_steps": 10,
+        "scarf_speed": 100,
+        "retract_length": 1.0,
+        "retract_speed": 50,
+        "retract_lift_z": 0.0,
+        "wipe_enabled": 0,
+        "wipe_distance": 1.5,
+        "wipe_speed": 40,
+        "wipe_retract_before": 0,
+        "notes": "AnkerMake/eufyMake Studio profile, stock 0.4 mm brass nozzle.",
+    },
+    {
+        "name": "AnkerMake PLA+ Silk",
+        "brand": "AnkerMake",
+        "material": "PLA",
+        "color": "#99ADA3",
+        "nozzle_temp_other_layer": 210,
+        "nozzle_temp_first_layer": 230,
+        "bed_temp_other_layer": 65,
+        "bed_temp_first_layer": 65,
+        "flow_rate": 1.0,
+        "filament_diameter": 1.75,
+        "pressure_advance": 0.0,
+        "max_volumetric_speed": 13.0,
+        "travel_speed": 150,
+        "perimeter_speed": 60,
+        "infill_speed": 80,
+        "cooling_enabled": 1,
+        "cooling_min_fan_speed": 100,
+        "cooling_max_fan_speed": 100,
+        "seam_position": "aligned",
+        "seam_gap": 0.0,
+        "scarf_enabled": 0,
+        "scarf_conditional": 0,
+        "scarf_angle_threshold": 155,
+        "scarf_length": 20.0,
+        "scarf_steps": 10,
+        "scarf_speed": 100,
+        "retract_length": 0.5,
+        "retract_speed": 20,
+        "retract_lift_z": 0.0,
+        "wipe_enabled": 0,
+        "wipe_distance": 1.5,
+        "wipe_speed": 40,
+        "wipe_retract_before": 0,
+        "notes": "AnkerMake/eufyMake Studio profile, stock 0.4 mm brass nozzle.",
+    },
+    {
+        "name": "AnkerMake PLA+ Glitter",
+        "brand": "AnkerMake",
+        "material": "PLA",
+        "color": "#00AD66",
+        "nozzle_temp_other_layer": 200,
+        "nozzle_temp_first_layer": 230,
+        "bed_temp_other_layer": 65,
+        "bed_temp_first_layer": 65,
+        "flow_rate": 1.0,
+        "filament_diameter": 1.75,
+        "pressure_advance": 0.0,
+        "max_volumetric_speed": 22.0,
+        "travel_speed": 150,
+        "perimeter_speed": 60,
+        "infill_speed": 80,
+        "cooling_enabled": 1,
+        "cooling_min_fan_speed": 100,
+        "cooling_max_fan_speed": 100,
+        "seam_position": "aligned",
+        "seam_gap": 0.0,
+        "scarf_enabled": 0,
+        "scarf_conditional": 0,
+        "scarf_angle_threshold": 155,
+        "scarf_length": 20.0,
+        "scarf_steps": 10,
+        "scarf_speed": 100,
+        "retract_length": 0.8,
+        "retract_speed": 60,
+        "retract_lift_z": 0.0,
+        "wipe_enabled": 0,
+        "wipe_distance": 1.5,
+        "wipe_speed": 40,
+        "wipe_retract_before": 0,
+        "notes": "AnkerMake/eufyMake Studio profile, stock 0.4 mm brass nozzle.",
+    },
+]
+_DEFAULTS += _ANKERMAKE_DEFAULTS
+
 _FIELDS = [
     "name", "brand", "material", "color",
     "nozzle_temp_other_layer", "nozzle_temp_first_layer",
@@ -385,6 +571,7 @@ class FilamentStore:
         - Rename nozzle_temp -> nozzle_temp_other_layer (SQLite 3.25+)
         - Rename bed_temp -> bed_temp_other_layer (SQLite 3.25+)
         - ADD COLUMN for each new column that may not exist yet
+        - v2: insert the AnkerMake profiles into existing stores
         """
         try:
             version = conn.execute("PRAGMA user_version").fetchone()[0]
@@ -428,6 +615,20 @@ class FilamentStore:
                         log.info("Filament store: added column %s", col_name)
                     except Exception as exc:
                         log.warning("Filament store: could not add column %s: %s", col_name, exc)
+
+            # Version 1 → 2: add the AnkerMake profiles to existing stores. Empty stores are
+            # skipped here because _seed_defaults() inserts the full _DEFAULTS right after.
+            if version < 2 and conn.execute("SELECT COUNT(*) FROM filaments").fetchone()[0] > 0:
+                names = {row[0] for row in conn.execute("SELECT name FROM filaments").fetchall()}
+                missing = [p for p in _ANKERMAKE_DEFAULTS if p["name"] not in names]
+                for profile in missing:
+                    cols = ", ".join(profile.keys())
+                    placeholders = ", ".join("?" for _ in profile)
+                    conn.execute(
+                        f"INSERT INTO filaments ({cols}) VALUES ({placeholders})",
+                        list(profile.values()),
+                    )
+                log.info("Filament store: added %d AnkerMake profiles", len(missing))
 
             conn.execute(f"PRAGMA user_version = {_CURRENT_SCHEMA_VERSION}")
         except Exception as e:
