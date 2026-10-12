@@ -1,10 +1,10 @@
 paho_mqtt==2.1.0
 pip==26.2.1
-pycryptodomex==3.23.0
+pycryptodomex==3.24.0
 rich==15.0.0
 requests==2.34.2
 click==8.5.0
-platformdirs==4.11.10
+platformdirs==4.12.4
 tinyec==0.4.0
 crcmod==1.7
 setuptools==84.0.0
