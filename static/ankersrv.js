@@ -1247,10 +1247,15 @@ $(function () {
      * This class wraps a WebSocket, and makes it automatically reconnect if the
      * connection is lost.
      */
-    function setConnectionBadge(selector, tone) {
-        $(selector)
+    function setConnectionBadge(selector, tone, status) {
+        if (!selector) return;
+        const badge = $(selector);
+        const label = `${badge.text()} · ${status}`;
+        if (badge.attr("title") === label && badge.hasClass(`text-bg-${tone}`)) return;
+        badge
             .removeClass("text-bg-success text-bg-danger text-bg-secondary text-bg-warning")
-            .addClass(`text-bg-${tone}`);
+            .addClass(`text-bg-${tone}`)
+            .attr({ title: label, "aria-label": label });
     }
 
     class AutoWebSocket {
@@ -1259,19 +1264,19 @@ $(function () {
             url,
             badge = null,
             open = null,
-            opened = null,
             close = null,
             error = null,
             message = null,
             binary = false,
             reconnect = 1000,
+            activityTimeout = 0,
+            activityTimeoutStatus = "No data received",
         }) {
             this.name = name;
             this.url = url;
             this.badge = badge;
             this.reconnect = reconnect;
             this.open = open;
-            this.opened = opened;
             this.close = close;
             this.error = error;
             this.message = message;
@@ -1279,15 +1284,33 @@ $(function () {
             this.ws = null;
             this.is_open = false;
             this.autoReconnect = reconnect !== false;
+            this.activityTimeout = activityTimeout;
+            this.activityTimeoutStatus = activityTimeoutStatus;
+            this.activityTimer = null;
         }
 
         _open() {
-            setConnectionBadge(this.badge, "warning");
+            this._watchActivity();
             if (this.open) this.open(this.ws);
         }
 
+        _watchActivity() {
+            clearTimeout(this.activityTimer);
+            if (this.activityTimeout) {
+                this.activityTimer = setTimeout(() => {
+                    setConnectionBadge(this.badge, "danger", this.activityTimeoutStatus);
+                }, this.activityTimeout);
+            }
+        }
+
+        reportActivity(status) {
+            setConnectionBadge(this.badge, "success", status);
+            this._watchActivity();
+        }
+
         _close() {
-            setConnectionBadge(this.badge, "danger");
+            clearTimeout(this.activityTimer);
+            setConnectionBadge(this.badge, "danger", "Disconnected");
             console.log(`${this.name} close`);
             this.is_open = false;
             const old = this.ws;
@@ -1300,15 +1323,8 @@ $(function () {
 
         _error() {
             console.log(`${this.name} error`);
-            const old = this.ws;
-            this.ws = null;
-            this.is_open = false;
-            try {
-                if (old) {
-                    old.close();
-                }
-            } catch (_) {}
-            if (this.error) this.error(old);
+            setConnectionBadge(this.badge, "danger", "Connection failed");
+            if (this.error) this.error(this.ws);
         }
 
         _message(event) {
@@ -1328,12 +1344,16 @@ $(function () {
                     // Not JSON — continue to normal message handling
                 }
             }
-            if (!this.is_open) {
-                setConnectionBadge(this.badge, "success");
-                this.is_open = true;
-                if (this.opened) this.opened(event);
-            }
+            this.is_open = true;
             if (this.message) this.message(event);
+        }
+
+        disconnect() {
+            this.autoReconnect = false;
+            if (!this.ws) return;
+            const ws = this.ws;
+            this._close();
+            ws.close();
         }
 
         connect() {
@@ -1343,12 +1363,16 @@ $(function () {
             if (this.ws) {
                 return;
             }
-            var ws = (this.ws = new WebSocket(this.url));
+            setConnectionBadge(this.badge, "warning", "Connecting");
+            const ws = (this.ws = new WebSocket(this.url));
             if (this.binary) ws.binaryType = "arraybuffer";
-            ws.addEventListener("open", this._open.bind(this));
-            ws.addEventListener("close", this._close.bind(this));
-            ws.addEventListener("error", this._error.bind(this));
-            ws.addEventListener("message", this._message.bind(this));
+            const onCurrentSocket = (handler) => (event) => {
+                if (this.ws === ws) handler.call(this, event);
+            };
+            ws.addEventListener("open", onCurrentSocket(this._open));
+            ws.addEventListener("close", onCurrentSocket(this._close));
+            ws.addEventListener("error", onCurrentSocket(this._error));
+            ws.addEventListener("message", onCurrentSocket(this._message));
         }
     }
 
@@ -1529,14 +1553,10 @@ $(function () {
         name: "mqtt socket",
         url: `${location.protocol.replace("http", "ws")}//${location.host}/ws/mqtt?printer_index=${encodeURIComponent(getActivePrinterIndex())}`,
         badge: "#badge-mqtt",
-
-        opened: function () {
-            _mqttLastMessageAt = Date.now();
-            _updateMqttReconnectButton();
-        },
+        activityTimeout: 30000,
+        activityTimeoutStatus: "No printer messages for 30 seconds",
 
         message: function (ev) {
-            _mqttLastMessageAt = Date.now();
             let data = null;
             try {
                 data = JSON.parse(ev.data);
@@ -1544,6 +1564,10 @@ $(function () {
                 console.warn("mqtt socket: failed to parse message", err);
                 return;
             }
+            if (!data || data.commandType == null) return;
+            _mqttLastMessageAt = Date.now();
+            _updateMqttReconnectButton();
+            this.reportActivity("Receiving printer messages");
             if (data.commandType == 1000) {
                 if (Number(data.subType) === 2 && Number(data.value) === 6) {
                     _filamentStatus.pendingRunout = false;
@@ -1769,12 +1793,16 @@ $(function () {
         badge: "#badge-video",
         binary: true,
         reconnect: 2000,
+        activityTimeout: 10000,
+        activityTimeoutStatus: "No video frames for 10 seconds",
 
         open: function () {
             this.player = new AnkerVideoPlayer(videoPlayer);
         },
 
         message: function (event) {
+            if (!(event.data instanceof ArrayBuffer) || !event.data.byteLength) return;
+            this.reportActivity("Receiving printer video");
             this.player?.enqueue(event.data);
         },
 
@@ -1784,7 +1812,6 @@ $(function () {
             this.player.destroy();
             this.player = null;
             $("#video-resolution").text("Current: -");
-            $(this.badge).removeClass("text-bg-warning text-bg-success").addClass("text-bg-danger");
         },
     });
 
@@ -1823,7 +1850,7 @@ $(function () {
     const ctrlPendingMessages = [];
     function sendCtrlMessage(payload) {
         const message = JSON.stringify(payload);
-        if (sockets.ctrl.ws && sockets.ctrl.ws.readyState === WebSocket.OPEN) {
+        if (sockets.ctrl.is_open && sockets.ctrl.ws?.readyState === WebSocket.OPEN) {
             try {
                 sockets.ctrl.ws.send(message);
                 return true;
@@ -1855,7 +1882,6 @@ $(function () {
         name: "Control socket",
         url: `${location.protocol.replace("http", "ws")}//${location.host}/ws/ctrl?printer_index=${encodeURIComponent(getActivePrinterIndex())}`,
         badge: "#badge-ctrl",
-        opened: flushCtrlMessages,
         message: function (event) {
             let data = null;
             try {
@@ -1863,11 +1889,11 @@ $(function () {
             } catch (err) {
                 return;
             }
-            flushCtrlMessages();
-            if (data.ankerctl) {
-                setConnectionBadge("#badge-ctrl", "warning");
+            if (data?.ankerctl) {
+                setConnectionBadge(this.badge, "success", "Control channel ready");
+                flushCtrlMessages();
             }
-            if (data.video_profile) {
+            if (data?.video_profile) {
                 setVideoProfileActive(data.video_profile);
             }
         },
@@ -1887,19 +1913,17 @@ $(function () {
                 console.warn("pppp socket: failed to parse message", err);
                 return;
             }
-            if (data.status === "connected") {
-                setConnectionBadge(this.badge, "success");
-                if (data.source === "service") {
-                    setConnectionBadge("#badge-ctrl", "success");
-                } else {
-                    setConnectionBadge("#badge-ctrl", "warning");
-                }
+            if (data.status === "connected" && data.source === "service") {
+                setConnectionBadge(this.badge, "success", "LAN session connected");
+            } else if (data.status === "connected" && data.source === "probe") {
+                setConnectionBadge(this.badge, "secondary", "Printer reachable, LAN session idle");
+            } else if (data.status === "connecting") {
+                setConnectionBadge(this.badge, "warning", "Opening LAN session");
             } else if (data.status === "disconnected") {
-                setConnectionBadge(this.badge, "warning");
-                setConnectionBadge("#badge-ctrl", "warning");
+                const status = data.source === "probe" ? "Printer did not answer the LAN probe" : "LAN session disconnected";
+                setConnectionBadge(this.badge, "danger", status);
             } else if (data.status === "dormant") {
-                setConnectionBadge(this.badge, "secondary");
-                setConnectionBadge("#badge-ctrl", "warning");
+                setConnectionBadge(this.badge, "secondary", "LAN session idle");
             }
         },
     });
@@ -1999,13 +2023,8 @@ $(function () {
             $("#vplayer").hide();
             $("#video-toggle").html('<i class="bi bi-camera-video"></i> Enable Video');
             sendCtrlMessage({ video_enabled: false });
-            sockets.video.autoReconnect = false;
-            if (sockets.video.ws) {
-                try {
-                    sockets.video.ws.close();
-                } catch (_) {}
-                sockets.video.ws = null;
-            }
+            sockets.video.disconnect();
+            setConnectionBadge("#badge-video", "secondary", "Printer video off");
             $("#video-resolution").text("Current: -");
         }
         renderCameraUi();
@@ -5873,16 +5892,6 @@ $(function () {
                         <i class="bi-${ok ? "check-circle" : "x-circle"}"></i>
                         Last result: ${ok ? "ok" : "fail"} <span class="text-muted">(just now)</span>
                     </span>`);
-                    // Immediately reflect result in the main PPPP badge
-                    if (ok) {
-                        $("#badge-pppp")
-                            .removeClass("text-bg-danger text-bg-warning text-bg-secondary")
-                            .addClass("text-bg-success");
-                    } else {
-                        $("#badge-pppp")
-                            .removeClass("text-bg-success text-bg-warning text-bg-secondary")
-                            .addClass("text-bg-danger");
-                    }
                 } else {
                     resultDiv.html(`<span class="text-danger small">${escapeHtml(data.error || "Error")}</span>`);
                 }

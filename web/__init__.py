@@ -775,11 +775,11 @@ def borrow_pppp(printer_index=None, ready=True):
     raise RuntimeError("No pppp service candidates available")
 
 
-def stream_mqtt(printer_index=None, maxsize=0):
+def stream_mqtt(printer_index=None, maxsize=0, **stream_options):
     last_error = None
     for name in _mqtt_service_candidates(printer_index):
         try:
-            return app.svc.stream(name, maxsize=maxsize)
+            return app.svc.stream(name, maxsize=maxsize, **stream_options)
         except (AssertionError, KeyError, AttributeError) as err:
             last_error = err
             continue
@@ -2379,7 +2379,11 @@ def mqtt(sock):
             log.info("/ws/mqtt: new client connected, cancelling MQTT reconnect back-off")
             _mqtt_svc_ref.reset_reconnect_backoff()
     try:
-        for data in stream_mqtt(printer_index, maxsize=MQTT_STREAM_QUEUE_MAX):
+        for data in stream_mqtt(
+            printer_index,
+            maxsize=MQTT_STREAM_QUEUE_MAX,
+            keep_streaming=lambda: getattr(sock, "connected", True),
+        ):
             log.debug(f"MQTT message: {data}")
             sock.send(json.dumps(data))
     except ConnectionClosed:
@@ -2533,8 +2537,9 @@ def pppp_state(sock):
 
     States emitted:
       "dormant"      — service not running (video/timelapse not active)
-      "connected"    — service running and PPPP handshake complete, or probe succeeded
-      "disconnected" — service was connected but the connection was lost, or probe failed
+      "connecting"   — service attempting its first PPPP handshake
+      "connected"    — PPPP handshake complete (service) or printer reachable (probe)
+      "disconnected" — session failed or was lost (service), or probe failed (probe)
     """
     if not app.config["login"]:
         log.info("Websocket connection rejected: no printer configured (use 'config import' or 'config login')")
@@ -2568,7 +2573,7 @@ def pppp_state(sock):
         _maybe_start_pppp_probe("first client", printer_index=printer_index)
 
     try:
-        while True:
+        while getattr(sock, "connected", True):
             now = time.time()
 
             # Passive read — no ref-count increment, never starts the service.
@@ -2583,6 +2588,10 @@ def pppp_state(sock):
                 with app.pppp_probe_lock:
                     probe["result"] = None
                     probe["fail_count"] = 0
+            elif pppp is not None and getattr(pppp, "wanted", False):
+                failed = pppp_was_connected or getattr(pppp, "_connect_failure_count", 0) > 0
+                current_status = "disconnected" if failed else "connecting"
+                current_source = "service"
             else:
                 # Check MQTT staleness and detect recovery transition
                 mqtt_svc = get_mqtt_service(printer_index)
@@ -2640,15 +2649,9 @@ def pppp_state(sock):
                 elif probe_result is False:
                     current_status = "disconnected"
                     current_source = "probe"
-                elif pppp is not None and getattr(pppp, "wanted", False) and pppp_was_connected:
-                    # Service is still wanted but lost its PPPP connection.
-                    current_status = "disconnected"
-                    current_source = "service"
                 else:
-                    # Service not running or connecting for the first time → dormant.
                     current_status = "dormant"
-                    if pppp is None or not getattr(pppp, "wanted", False):
-                        pppp_was_connected = False
+                    pppp_was_connected = False
 
             if (
                 current_status != last_status

@@ -4,6 +4,8 @@ from contextlib import contextmanager
 from datetime import datetime
 from types import SimpleNamespace
 
+import pytest
+
 from cli.model import Account, Config, Printer
 from simple_websocket.errors import ConnectionClosed
 
@@ -534,6 +536,25 @@ def test_pppp_state_websocket_marks_stale_probe_success_dormant_without_reprobe(
 
     assert json.loads(sock.sent[0]) == {"status": "dormant", "source": "none"}
     assert probe_calls == []
+
+
+@pytest.mark.parametrize("failures, expected", [(0, "connecting"), (1, "disconnected")])
+def test_pppp_state_prefers_pending_session_over_recent_probe(monkeypatch, failures, expected):
+    service = SimpleNamespace(connected=False, wanted=True, _connect_failure_count=failures)
+    services = FakeServices(svcs={web_module.pppp_service_name(0): service})
+    old_values, old_svc = _install_app_state(web_module, svc=services)
+    monkeypatch.setattr(web_module.app, "pppp_probe", {"per_printer": {}})
+    web_module._get_pppp_probe_state(0).update(result=True, last_time=100.0)
+    monkeypatch.setattr(web_module.time, "time", lambda: 101.0)
+
+    try:
+        sock = FakeSock(close_after_sends=1)
+        with web_module.app.test_request_context("/ws/pppp-state?printer_index=0"):
+            _ws_handler(web_module, "pppp_state")(sock)
+    finally:
+        _restore_app_state(web_module, old_values, old_svc)
+
+    assert json.loads(sock.sent[0]) == {"status": expected, "source": "service"}
 
 
 def test_pppp_probe_helper_skips_when_services_are_already_recovering(monkeypatch):

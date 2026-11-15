@@ -183,12 +183,12 @@
                         <div>
                             {{ printer.name }} ({{ printer.sn }})
                         </div>
-                        <span id="badge-mqtt" class="badge">MQTT</span>
-                        <span id="badge-pppp" class="badge text-bg-secondary">PPPP</span>
+                        <span id="badge-mqtt" class="badge text-bg-secondary" role="img" title="MQTT · Disconnected" aria-label="MQTT · Disconnected">MQTT</span>
+                        <span id="badge-pppp" class="badge text-bg-secondary" role="img" title="PPPP · LAN session idle" aria-label="PPPP · LAN session idle">PPPP</span>
                         {% if video_supported %}
-                        <span id="badge-video" class="badge">VIDEO</span>
+                        <span id="badge-video" class="badge text-bg-secondary" role="img" title="VIDEO · Printer video off" aria-label="VIDEO · Printer video off">VIDEO</span>
                         {% endif %}
-                        <span id="badge-ctrl" class="badge">CTRL</span>
+                        <span id="badge-ctrl" class="badge text-bg-secondary" role="img" title="CTRL · Disconnected" aria-label="CTRL · Disconnected">CTRL</span>
                         <div id="mqtt-reconnect-hint" class="mt-2" style="display:none">
                             <button id="btn-mqtt-reconnect" class="btn btn-sm btn-outline-warning">
                                 <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14"

@@ -39,32 +39,30 @@ def pppp_open(config, printer_index, timeout=None, dumpfile=None):
         if not ip_addr:
             raise ConnectionRefusedError("No printer IP found; ensure printer is online on the same network")
 
+    duid = Duid.from_string(printer.p2p_duid)
     attempt = 0
+    broadcast = False
     while True:
         attempt += 1
-        api = AnkerPPPPApi.open_lan(Duid.from_string(printer.p2p_duid), host=ip_addr)
+        api = AnkerPPPPApi.open_lan(duid, host=ip_addr, broadcast=broadcast)
         _pppp_dumpfile(api, dumpfile)
 
+        method = "interface broadcast" if broadcast else "direct discovery"
         log.info(
-            f"Trying connect to printer {printer.name} ({printer.p2p_duid}) over pppp using ip {ip_addr}"
+            f"Trying connect to printer {printer.name} ({printer.p2p_duid}) over pppp using ip {ip_addr} and {method}"
             + (f" (attempt {attempt})" if attempt > 1 else "")
         )
 
         api.connect_lan_search()
         api.start()
 
-        # Cap each attempt to a sub-window of the overall deadline. A silent
-        # non-completing attempt (no CLOSE, connection just never establishes)
-        # must not consume the whole budget, or the retry loop below never
-        # gets a second attempt.
-        attempt_deadline = None
-        if deadline:
-            attempt_deadline = min(
-                deadline, datetime.now() + timedelta(seconds=_PPPP_OPEN_ATTEMPT_WINDOW)
-            )
+        # Leave time for another discovery method when the printer stays silent.
+        attempt_deadline = datetime.now() + timedelta(seconds=_PPPP_OPEN_ATTEMPT_WINDOW)
+        if deadline is not None:
+            attempt_deadline = min(deadline, attempt_deadline)
 
         while api.state != PPPPState.Connected and not api.stopped.is_set():
-            if attempt_deadline and datetime.now() > attempt_deadline:
+            if datetime.now() >= attempt_deadline:
                 break
             time.sleep(0.1)
 
@@ -72,6 +70,7 @@ def pppp_open(config, printer_index, timeout=None, dumpfile=None):
             log.info("Established pppp connection")
             return api
 
+        timed_out = not api.stopped.is_set()
         # Rejected by the printer (or timed out establishing this attempt).
         # The printer can take a moment to free up its single PPPP session
         # slot after a previous connection closes, so retry within the
@@ -82,9 +81,13 @@ def pppp_open(config, printer_index, timeout=None, dumpfile=None):
         except OSError as exc:
             log.debug(f"PPPP socket close failed: {exc}")
 
-        if not deadline or datetime.now() >= deadline:
+        if deadline is None and (broadcast or not timed_out):
+            raise ConnectionRefusedError("Connection rejected by device")
+        if deadline is not None and datetime.now() >= deadline:
             raise ConnectionRefusedError("Connection rejected by device")
 
+        if timed_out:
+            broadcast = not broadcast
         time.sleep(_PPPP_OPEN_RETRY_GAP)
 
 
