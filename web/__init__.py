@@ -816,7 +816,7 @@ def borrow_videoqueue(printer_index=None):
     raise RuntimeError("No videoqueue service candidates available")
 
 
-def stream_videoqueue(printer_index=None, maxsize=0):
+def stream_videoqueue(printer_index=None, maxsize=0, **stream_options):
     ordered_names = [resolve_video_service_name(printer_index)]
     ordered_names.extend(
         name for name in _video_service_candidates(printer_index)
@@ -825,7 +825,7 @@ def stream_videoqueue(printer_index=None, maxsize=0):
     last_error = None
     for name in ordered_names:
         try:
-            return app.svc.stream(name, maxsize=maxsize)
+            return app.svc.stream(name, maxsize=maxsize, **stream_options)
         except (AssertionError, KeyError, AttributeError) as err:
             last_error = err
             continue
@@ -2396,9 +2396,8 @@ def video(sock):
     """
     Handles receiving and sending messages on the 'videoqueue' stream service through websocket.
 
-    Each connected client expresses intent to receive video by connecting here.
-    video_enabled is set True on connect and cleared when the last client disconnects,
-    so multiple tabs can independently enable/disable without interfering.
+    Each connection holds its own viewer reference to the requested printer's
+    video service, alongside any explicit live view or timelapse request.
     """
     if not app.config["login"]:
         return
@@ -2414,7 +2413,11 @@ def video(sock):
 
     vq.viewer_connected()
     try:
-        for msg in stream_videoqueue(printer_index, maxsize=VIDEO_STREAM_QUEUE_MAX):
+        for msg in stream_videoqueue(
+            printer_index,
+            maxsize=VIDEO_STREAM_QUEUE_MAX,
+            keep_streaming=lambda: getattr(sock, "connected", True),
+        ):
             payload = getattr(msg, "data", None)
             if not payload:
                 continue
@@ -2427,11 +2430,7 @@ def video(sock):
         log.warning(f"/ws/video error: {exc}")
         log.info("Stack trace:", exc_info=True)
     finally:
-        # /ws/video is only a consumer of the shared video service.
-        # The explicit owner of video enable/disable is /ws/ctrl via
-        # {"video_enabled": true/false}.  Do not tear the service down here,
-        # because transient websocket disconnects or reconnects would otherwise
-        # stop live video for the whole app.
+        # Release this viewer's reference. Timelapse and live view keep their own holds.
         try:
             vq.viewer_disconnected()
         except Exception as exc:
@@ -2899,6 +2898,37 @@ def app_root():
             unsupported_device=app.config.get("unsupported_device", False),
             ankerctl_root=os.path.realpath(ROOT_DIR),
         )
+
+
+@app.get("/cameras")
+def app_cameras():
+    cameras = []
+    config = app.config.get("config")
+    if config and app.config.get("login"):
+        ffmpeg_available = _ffmpeg_available()
+        with config.open() as cfg:
+            for index, printer in enumerate(getattr(cfg, "printers", []) or []):
+                if printer.model in UNSUPPORTED_PRINTERS:
+                    continue
+                settings = _resolve_camera_settings(cfg, printer_index=index)
+                source = settings.get("effective_source")
+                if source == web.camera.CAMERA_SOURCE_PRINTER:
+                    mode = "video"
+                elif source == web.camera.CAMERA_SOURCE_EXTERNAL:
+                    if not ffmpeg_available:
+                        mode = "unavailable"
+                    else:
+                        mode = "stream" if settings["external"]["stream_url"] else "frame"
+                else:
+                    continue
+                cameras.append({
+                    "index": index,
+                    "name": printer.name or f"Printer {index + 1}",
+                    "mode": mode,
+                    "refresh_sec": settings["external"]["refresh_sec"],
+                })
+
+    return render_template("cameras.html", cameras=cameras)
 
 
 @app.get("/api/health")
@@ -5954,6 +5984,7 @@ def add_security_headers(response):
 # GET endpoints that modify state or expose sensitive debug information
 # and therefore require auth even though they are GET requests.
 _PROTECTED_GET_PATHS = {
+    "/cameras",
     "/api/ankerctl/server/reload",
     "/api/console/logs",
     "/api/debug/state",

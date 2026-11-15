@@ -269,3 +269,16 @@ code {
         min-width: 0;
     }
 }
+.camera-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(min(100%, 22rem), 1fr));
+    gap: 1rem;
+    align-items: start;
+}
+
+.camera-tile-media {
+    width: 100%;
+    aspect-ratio: 16 / 9;
+    object-fit: contain;
+    background: #111;
+}

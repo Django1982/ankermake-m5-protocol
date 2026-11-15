@@ -1771,104 +1771,36 @@ $(function () {
         reconnect: 2000,
 
         open: function () {
-            this.videoQueue = [];
-            this.videoBufferMinPackets = 2;
-            this.videoBufferDelayMs = 120;
-            this.videoBufferMaxPackets = 120;
-            this.videoBufferCatchupPackets = 24;
-            this.videoPumpMaxPacketsPerTick = 24;
-            this.videoBuffering = true;
-            this.jmuxer = new JMuxer({
-                node: "player",
-                mode: "video",
-                flushingTime: 0,
-                fps: 15,
-                // debug: true,
-                onError: function (data) {
-                    console.warn("JMuxer video error", data);
-                },
-            });
-            this.videoPump = window.setInterval(() => {
-                if (!this.jmuxer) return;
-
-                const now = window.performance && window.performance.now ? window.performance.now() : Date.now();
-                if (this.videoBuffering) {
-                    const firstPacket = this.videoQueue[0];
-                    const firstPacketAge = firstPacket ? now - firstPacket.receivedAt : 0;
-                    if (
-                        this.videoQueue.length < this.videoBufferMinPackets &&
-                        firstPacketAge < this.videoBufferDelayMs
-                    ) {
-                        return;
-                    }
-                    this.videoBuffering = false;
-                }
-
-                let fedPackets = 0;
-                while (this.videoQueue.length && fedPackets < this.videoPumpMaxPacketsPerTick) {
-                    const packet = this.videoQueue[0];
-                    const packetAge = now - packet.receivedAt;
-                    if (packetAge < this.videoBufferDelayMs && this.videoQueue.length <= this.videoBufferMinPackets) {
-                        break;
-                    }
-                    this.videoQueue.shift();
-                    try {
-                        this.jmuxer.feed({
-                            video: new Uint8Array(packet.data),
-                        });
-                    } catch (err) {
-                        console.log({ type: "video", name: err?.name || "feed", error: err?.message || String(err) });
-                        this.videoBuffering = true;
-                        return;
-                    }
-                    fedPackets++;
-                }
-
-                if (!fedPackets && !this.videoQueue.length) {
-                    this.videoBuffering = true;
-                }
-            }, 16);
+            this.player = new AnkerVideoPlayer(videoPlayer);
         },
 
         message: function (event) {
-            if (!(event.data instanceof ArrayBuffer) || event.data.byteLength === 0) {
-                return;
-            }
-            if (!this.videoQueue) {
-                this.videoQueue = [];
-            }
-            const now = window.performance && window.performance.now ? window.performance.now() : Date.now();
-            this.videoQueue.push({
-                // event.data is a fresh ArrayBuffer per message, no copy needed
-                data: event.data,
-                receivedAt: now,
-            });
-            if (this.videoQueue.length > this.videoBufferMaxPackets) {
-                const keepPackets = Math.max(this.videoBufferCatchupPackets, this.videoBufferMinPackets);
-                this.videoQueue.splice(0, this.videoQueue.length - keepPackets);
-                this.videoBuffering = true;
-            }
+            this.player?.enqueue(event.data);
         },
 
         close: function () {
-            if (this.videoPump) {
-                window.clearInterval(this.videoPump);
-                this.videoPump = null;
-            }
-            this.videoQueue = [];
-            this.videoBuffering = true;
+            if (!this.player) return;
 
-            if (!this.jmuxer) return;
-
-            this.jmuxer.destroy();
-            this.jmuxer = null;
-
-            /* Clear video source (to show loading animation) */
-            $("#player").attr("src", "");
+            this.player.destroy();
+            this.player = null;
             $("#video-resolution").text("Current: -");
-
             $(this.badge).removeClass("text-bg-warning text-bg-success").addClass("text-bg-danger");
         },
+    });
+
+    const allCamerasLink = document.getElementById("open-all-cameras");
+    let camerasWindow;
+    allCamerasLink?.addEventListener("click", (event) => {
+        if (event.ctrlKey || event.metaKey || event.shiftKey || event.altKey) return;
+
+        if (!camerasWindow || camerasWindow.closed) {
+            camerasWindow = window.open(allCamerasLink.href, "ankerctl-cameras", "popup,width=1280,height=650");
+            if (camerasWindow) camerasWindow.opener = null;
+        }
+        if (camerasWindow) {
+            event.preventDefault();
+            camerasWindow.focus();
+        }
     });
 
     const videoPlayer = document.getElementById("player");

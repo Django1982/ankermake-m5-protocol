@@ -285,7 +285,7 @@ def test_video_queue_disable_live_view_keeps_timelapse_stream_running():
     queue.wanted = True
     queue.persistent = True
     queue.state = RunState.Running
-    queue._viewer_count = 1
+    queue._viewer_count = 0
     queue._pending_disable = False
     queue._live_active = True
     queue._live_started_at = 100.0
@@ -300,8 +300,10 @@ def test_video_queue_disable_live_view_keeps_timelapse_stream_running():
 
     queue.stop = lambda: stop_calls.append(True)
 
+    assert queue.viewer_connected() == 1
     assert queue.set_video_enabled(False) is True
 
+    assert queue.viewer_disconnected() == 0
     assert stop_calls == []
     assert queue.video_enabled is False
     assert queue.timelapse_enabled is True
@@ -635,6 +637,36 @@ def test_pppp_worker_stop_safe_without_api():
     # Simulate state after a failed worker_start (no _api attribute)
     assert not hasattr(svc, "_api")
     svc.worker_stop()  # should not raise
+
+
+def test_pppp_worker_retries_timed_out_direct_search_using_broadcast(monkeypatch):
+    config = _config()
+    config.printers[0].p2p_duid = "ABCDEF1-123456-CHK01"
+    monkeypatch.setitem(app.config, "config", FakeConfigManager(config))
+    monkeypatch.setattr("cli.pppp.pppp_resolve_printer_ip", lambda *args, **kwargs: "192.168.1.10")
+    service = object.__new__(PPPPService)
+    service.printer_index = 0
+    service._connected_event = Event()
+    service._log_repeated = lambda *args: None
+    connection = object()
+    attempts = []
+
+    def connect(duid, ip_addr, deadline, *, broadcast=False):
+        attempts.append((str(duid), ip_addr, deadline, broadcast))
+        if not broadcast:
+            raise TimeoutError
+        return connection
+
+    service._connect_lan = connect
+    service.worker_start()
+
+    assert [(duid, host, broadcast) for duid, host, _, broadcast in attempts] == [
+        ("ABCDEF1-123456-CHK01", "192.168.1.10", False),
+        ("ABCDEF1-123456-CHK01", "192.168.1.10", True),
+    ]
+    assert attempts[0][2] == attempts[1][2]
+    assert service._api is connection
+    assert service._connected_event.is_set()
 
 
 def test_force_close_api_sends_close_packet_when_connected():

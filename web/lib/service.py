@@ -628,13 +628,15 @@ class ServiceManager:
             # If another producer won the race, drop the stale realtime item.
             pass
 
-    def stream(self, name: str, maxsize=0):
+    def stream(self, name: str, maxsize=0, keep_streaming=None):
         try:
             with self.borrow(name) as svc:
                 q = Queue(maxsize=max(0, int(maxsize or 0)))
 
                 with svc.tap(lambda data: self._enqueue_stream_item(q, data)):
                     while svc.state == RunState.Running:
+                        if keep_streaming is not None and not keep_streaming():
+                            return
                         try:
                             data = q.get(timeout=1.0)
                         except queue.Empty:

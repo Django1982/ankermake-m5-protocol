@@ -130,6 +130,24 @@ def _restore_app_state(module, old_values, old_svc):
         module.app.config[key] = value
 
 
+def test_camera_window_lists_both_printers_and_requires_configured_api_key():
+    old_values, old_svc = _install_app_state(web_module, api_key=API_KEY, printer_index=1)
+    try:
+        with web_module.app.test_client() as client:
+            assert client.get("/cameras").status_code == 401
+            client.get("/cameras", query_string={"apikey": API_KEY})
+            response = client.get("/cameras")
+
+        assert response.status_code == 200
+        assert b'data-camera-index="0"' in response.data
+        assert b'data-camera-index="1"' in response.data
+        assert response.data.count(b'data-camera-mode="video"') == 2
+        assert b"Printer 1" in response.data
+        assert b"Printer 2" in response.data
+    finally:
+        _restore_app_state(web_module, old_values, old_svc)
+
+
 def test_mqtt_and_upload_websockets_forward_stream_messages():
     sock = FakeSock()
     mqtt_name = web_module.mqtt_service_name(0)

@@ -1,0 +1,40 @@
+{% import "macro.html" as macro -%}
+<!DOCTYPE html>
+<html data-bs-theme="dark" lang="en">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>All cameras · ankerctl</title>
+    <link rel="icon" href="{{ url_for('static', filename='img/logo.svg') }}">
+    {{ macro.static_css("vendor/bootstrap-5.3.0-alpha3-dist/css/bootstrap.min.css") }}
+    {{ macro.static_css("ankersrv.css") }}
+</head>
+<body>
+    <main class="container-fluid p-3">
+        <h1 class="h4 mb-3">All cameras</h1>
+        <div class="camera-grid">
+            {% for camera in cameras %}
+            <section class="card overflow-hidden" data-camera-index="{{ camera.index }}"
+                     data-camera-mode="{{ camera.mode }}" data-refresh-sec="{{ camera.refresh_sec }}">
+                <div class="card-header d-flex flex-wrap align-items-baseline justify-content-between gap-2">
+                    <h2 class="h6 mb-0">{{ camera.name }}</h2>
+                    <span class="small text-body-secondary" data-camera-status role="status">
+                        {{ "FFmpeg is required" if camera.mode == "unavailable" else "Connecting…" }}
+                    </span>
+                </div>
+                {% if camera.mode == "video" %}
+                <video class="camera-tile-media" autoplay muted playsinline aria-label="{{ camera.name }} live camera"></video>
+                {% elif camera.mode in ("stream", "frame") %}
+                <img class="camera-tile-media" alt="{{ camera.name }} camera preview" hidden>
+                {% endif %}
+            </section>
+            {% else %}
+            <p class="text-body-secondary">No printer cameras are configured.</p>
+            {% endfor %}
+        </div>
+    </main>
+    {{ macro.static_script("vendor/jmuxer.min.js") }}
+    {{ macro.static_script("video-player.js") }}
+    {{ macro.static_script("cameras.js") }}
+</body>
+</html>

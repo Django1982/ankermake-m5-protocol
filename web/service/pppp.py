@@ -5,7 +5,7 @@ import threading
 import time
 
 from collections import OrderedDict
-from datetime import datetime, timedelta
+from datetime import datetime
 
 from ..lib.service import Service, ServiceRestartSignal, ServiceStoppedError
 from .. import app
@@ -22,6 +22,7 @@ log = logging.getLogger("pppp")
 # a video/timelapse recovery. A slightly longer deadline avoids unnecessary
 # reconnect loops on otherwise healthy links.
 _CONNECT_DEADLINE_SEC = 8.0
+_DIRECT_SEARCH_TIMEOUT_SEC = 2.0
 _REPEATED_LOG_COOLDOWN_SEC = 10.0
 _REPEATED_LOG_NOTICE_COUNT = 5
 _LOG_REPEAT_STATE_MAX = 256
@@ -278,8 +279,6 @@ class PPPPService(Service):
 
         config = app.config["config"]
 
-        deadline = datetime.now() + timedelta(seconds=_CONNECT_DEADLINE_SEC)
-
         with config.open() as cfg:
             if not cfg:
                 raise ServiceStoppedError("No config available")
@@ -306,14 +305,8 @@ class PPPPService(Service):
                 delay=self._note_connection_lost(),
             )
 
-        api = AnkerPPPPAsyncApi.open_lan(Duid.from_string(printer.p2p_duid), host=ip_addr)
-        if app.config["pppp_dump"]:
-            dumpfile = app.config["pppp_dump"]
-            log.info(f"Logging all pppp traffic to {dumpfile!r}")
-            pktwr = PacketWriter.open(dumpfile)
-            api.set_dumper(pktwr)
-
-        started_at = datetime.now()
+        started_at = time.monotonic()
+        deadline = started_at + _CONNECT_DEADLINE_SEC
         self._log_repeated(
             logging.INFO,
             ("connect_attempt", printer_index, ip_addr),
@@ -326,55 +319,68 @@ class PPPPService(Service):
             _CONNECT_DEADLINE_SEC,
         )
 
-        api.connect_lan_search()
-
-        while api.state != PPPPState.Connected:
-            remaining = (deadline - datetime.now()).total_seconds()
-            if remaining <= 0:
-                elapsed = (datetime.now() - started_at).total_seconds()
-                self._log_repeated(
-                    logging.WARNING,
-                    ("connect_timeout", printer_index, ip_addr),
-                    "%s: PPPP connection timed out after %.1fs "
-                    "(printer=%s, ip=%s, state=%s)",
-                    self.name,
-                    elapsed,
-                    printer.name,
-                    ip_addr,
-                    getattr(api, "state", None),
-                )
-                raise ServiceRestartSignal(
-                    "Connection rejected by device", delay=self._note_connection_lost()
-                )
+        duid = Duid.from_string(printer.p2p_duid)
+        try:
             try:
-                msg = api.recv(timeout=remaining)
-                api.process(msg)
-            except ConnectionResetError:
-                elapsed = (datetime.now() - started_at).total_seconds()
+                api = self._connect_lan(duid, ip_addr, deadline)
+            except TimeoutError:
+                if time.monotonic() >= deadline:
+                    raise
                 self._log_repeated(
-                    logging.WARNING,
-                    ("connect_reset", printer_index, ip_addr),
-                    "%s: PPPP connection reset after %.1fs "
-                    "(printer=%s, ip=%s)",
+                    logging.INFO,
+                    ("broadcast_search", printer_index, ip_addr),
+                    "%s: direct PPPP search timed out; trying interface broadcast for %s",
                     self.name,
-                    elapsed,
                     printer.name,
-                    ip_addr,
                 )
-                raise ServiceRestartSignal(
-                    "Connection rejected by device", delay=self._note_connection_lost()
-                )
+                api = self._connect_lan(duid, ip_addr, deadline, broadcast=True)
+        except (TimeoutError, ConnectionResetError) as exc:
+            reason = "timed out" if isinstance(exc, TimeoutError) else "reset"
+            self._log_repeated(
+                logging.WARNING,
+                ("connect_failure", reason, printer_index, ip_addr),
+                "%s: PPPP connection %s after %.1fs (printer=%s, ip=%s)",
+                self.name,
+                reason,
+                time.monotonic() - started_at,
+                printer.name,
+                ip_addr,
+            )
+            raise ServiceRestartSignal(
+                f"PPPP connection {reason}", delay=self._note_connection_lost()
+            ) from exc
 
-        elapsed = (datetime.now() - started_at).total_seconds()
         log.info(
             "%s: established pppp connection to %s in %.1fs",
             self.name,
             printer.name,
-            elapsed,
+            time.monotonic() - started_at,
         )
         self._api = api
         self._connected_event.set()
         self._connected_since = datetime.now()
+
+    def _connect_lan(self, duid, ip_addr, deadline, *, broadcast=False):
+        api = AnkerPPPPAsyncApi.open_lan(duid, host=ip_addr, broadcast=broadcast)
+        try:
+            if dumpfile := app.config.get("pppp_dump"):
+                log.info("Logging all pppp traffic to %r", dumpfile)
+                api.set_dumper(PacketWriter.open(dumpfile))
+            api.connect_lan_search()
+            receive_deadline = deadline if broadcast else min(deadline, time.monotonic() + _DIRECT_SEARCH_TIMEOUT_SEC)
+            while api.state != PPPPState.Connected:
+                remaining = receive_deadline - time.monotonic()
+                if remaining <= 0:
+                    raise TimeoutError("Timed out establishing PPPP connection")
+                packet = api.recv(timeout=remaining)
+                if packet.type == Type.PUNCH_PKT:
+                    receive_deadline = deadline
+                api.process(packet)
+            return api
+        finally:
+            if api.state != PPPPState.Connected:
+                with contextlib.suppress(OSError):
+                    api.sock.close()
 
     def _drain_xzyh(self, chan):
         api = getattr(self, "_api", None)
