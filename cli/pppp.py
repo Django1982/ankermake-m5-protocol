@@ -98,17 +98,19 @@ def pppp_open_broadcast(dumpfile=None):
     return api
 
 
-def probe_printer_ip(printer, ip_addr, timeout=2.0, attempts=_PPPP_PROBE_ATTEMPTS):
+def probe_printer_ip(printer, ip_addr, timeout=2.0, attempts=_PPPP_PROBE_ATTEMPTS, *, broadcast=False):
     """Check if a printer is reachable at a specific IP via a lightweight LAN search.
 
-    Sends a directed PktLanSearch and waits for a PktPunchPkt response.
+    Sends a PktLanSearch and waits for a PktPunchPkt response from the selected printer.
     Does NOT establish a full PPPP session, so it won't interfere with
     subsequent connection attempts.
     """
     if not ip_addr:
         return False
 
-    api = AnkerPPPPAsyncApi.open_lan(Duid.from_string(printer.p2p_duid), host=ip_addr)
+    duid = Duid.from_string(printer.p2p_duid)
+    options = {"broadcast": True} if broadcast else {}
+    api = AnkerPPPPAsyncApi.open_lan(duid, host=ip_addr, **options)
     try:
         total_timeout = max(float(timeout or 0.0), 0.1)
         max_attempts = max(1, int(attempts or 1))
@@ -124,7 +126,7 @@ def probe_printer_ip(printer, ip_addr, timeout=2.0, attempts=_PPPP_PROBE_ATTEMPT
                     msg = api.recv(timeout=remaining)
                 except (TimeoutError, ConnectionResetError, StopIteration):
                     break
-                if isinstance(msg, PktPunchPkt):
+                if isinstance(msg, PktPunchPkt) and str(msg.duid) == str(duid):
                     return True
             if time.monotonic() >= deadline:
                 break

@@ -3578,6 +3578,44 @@ $(function () {
         }
     });
 
+    $("#windows-firewall-form [data-firewall-action]").on("click", async function () {
+        const action = this.dataset.firewallAction;
+        const printer = $("#windows-firewall-printer");
+        const controls = $("#windows-firewall-form button, #windows-firewall-printer");
+        const status = document.getElementById("windows-firewall-result");
+        status.hidden = false;
+        status.textContent = action === "download" ? "Preparing the helper…" : "Testing the printer from the ankerctl host…";
+        controls.prop("disabled", true);
+        try {
+            const params = new URLSearchParams({ printer_index: printer.val() });
+            const response = await fetch(`/api/settings/windows-firewall/${action}?${params}`, { method: "POST" });
+            if (!response.ok) {
+                const details = await response.json().catch(() => ({}));
+                throw new Error(details.error || `HTTP ${response.status}`);
+            }
+            if (action === "download") {
+                const url = URL.createObjectURL(await response.blob());
+                const link = document.createElement("a");
+                link.href = url;
+                link.download = "ankerctl-firewall-setup.cmd";
+                document.body.appendChild(link);
+                link.click();
+                link.remove();
+                setTimeout(() => URL.revokeObjectURL(url), 1000);
+                status.textContent = "Helper downloaded. Open it on the ankerctl PC.";
+            } else {
+                const result = await response.json();
+                status.textContent = result.reachable
+                    ? "The printer answered LAN discovery. Try the camera or upload again."
+                    : "The printer did not answer. Check its IP in Setup → Printer, then test again.";
+            }
+        } catch (error) {
+            status.textContent = error.message;
+        } finally {
+            controls.prop("disabled", false);
+        }
+    });
+
     loadCameraSettings();
 
     /**

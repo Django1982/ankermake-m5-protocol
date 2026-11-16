@@ -37,7 +37,7 @@
                         <button class="nav-link" id="setup-launcher-tab" data-bs-toggle="pill"
                             data-bs-target="#setup-launcher-pane" type="button" role="tab"
                             aria-controls="setup-launcher-pane" aria-selected="false">
-                            {{ macro.bi_icon("download") }} Launcher
+                            {{ macro.bi_icon("download") }} {{ "Windows" if windows_firewall_host else "Launcher" }}
                         </button>
                     </li>
                     <li class="nav-item" role="presentation">
@@ -685,6 +685,30 @@
                     <!-- ===== LAUNCHER TAB ===== -->
                     <div class="tab-pane fade" id="setup-launcher-pane" role="tabpanel"
                         aria-labelledby="setup-launcher-tab">
+                        {% if windows_firewall_host and configure and printers | selectattr('supported') | list %}
+                        <div class="card mb-3">
+                            <div class="card-header fs-4">Windows Firewall</div>
+                            <div class="card-body">
+                                <p>Use this if ankerctl can see the printer but the built-in camera or uploads cannot connect.</p>
+                                <form id="windows-firewall-form" class="vstack gap-3">
+                                    <div>
+                                        <label class="form-label" for="windows-firewall-printer">Printer</label>
+                                        <select class="form-select w-auto" id="windows-firewall-printer" name="printer_index">
+                                            {% for p in printers if p.supported %}
+                                            <option value="{{ p.index }}" {% if p.index == active_printer_index %}selected{% endif %}>{{ p.name }}</option>
+                                            {% endfor %}
+                                        </select>
+                                    </div>
+                                    <p class="mb-0">Download the helper and open it on <strong>{{ windows_firewall_host }}</strong>, the PC running ankerctl. Approve the Windows administrator prompt, then return here and test the connection.</p>
+                                    <div class="d-flex flex-wrap gap-2">
+                                        <button class="btn btn-primary" type="button" data-firewall-action="download">Download firewall helper</button>
+                                        <button class="btn btn-outline-secondary" type="button" data-firewall-action="test">Test connection</button>
+                                    </div>
+                                    <div id="windows-firewall-result" class="small text-muted" role="status" hidden></div>
+                                </form>
+                            </div>
+                        </div>
+                        {% endif %}
                         <div class="row g-3">
                             <div class="col-lg-7">
                                 <div class="card">

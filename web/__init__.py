@@ -269,6 +269,7 @@ import web.camera
 import web.platform
 import web.timelapse_settings
 import web.util
+import web.windows_firewall
 
 import cli.util
 import cli.config
@@ -2900,6 +2901,7 @@ def app_root():
             printer_index_locked=app.config.get("printer_index_locked", False),
             unsupported_device=app.config.get("unsupported_device", False),
             ankerctl_root=os.path.realpath(ROOT_DIR),
+            windows_firewall_host=web.windows_firewall.host_name() if web.windows_firewall.available() else None,
         )
 
 
@@ -3567,6 +3569,43 @@ def app_api_settings_launcher_bat():
             "Content-Disposition": 'attachment; filename="ankerctl-launcher.bat"',
         },
     )
+
+
+@app.post("/api/settings/windows-firewall/<any(download,test):action>")
+def app_api_windows_firewall(action):
+    if not web.windows_firewall.available():
+        return {"error": "Windows Firewall setup is available on Windows hosts."}, 404
+
+    printer_index = request.args.get("printer_index", type=int)
+    config = app.config.get("config")
+    if printer_index is None or not config or not app.config.get("login"):
+        return {"error": "Select a configured printer first."}, 400
+    with config.open() as cfg:
+        printers = getattr(cfg, "printers", [])
+        if not 0 <= printer_index < len(printers) or printers[printer_index].model in UNSUPPORTED_PRINTERS:
+            return {"error": "Select a supported printer."}, 400
+        printer = printers[printer_index]
+
+    try:
+        address = web.windows_firewall.printer_address(printer.ip_addr)
+        if action == "download":
+            return Response(
+                web.windows_firewall.build_helper(printer, address),
+                mimetype="application/octet-stream",
+                headers={
+                    "Content-Disposition": 'attachment; filename="ankerctl-firewall-setup.cmd"',
+                    "Cache-Control": "no-store",
+                },
+            )
+        reachable = cli.pppp.probe_printer_ip(printer, address) or cli.pppp.probe_printer_ip(
+            printer, address, broadcast=True
+        )
+    except ValueError as exc:
+        return {"error": str(exc)}, 400
+    except OSError as exc:
+        log.warning("Windows Firewall %s failed for printer index %s: %s", action, printer_index, exc)
+        return {"error": "Windows could not complete the request. Check the host network and server log."}, 503
+    return {"reachable": reachable}
 
 
 @app.get("/api/settings/timelapse")
