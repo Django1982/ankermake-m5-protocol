@@ -56,6 +56,8 @@ MQTT_PRINT_STATE_LABELS = {
     8: "preparing_or_aborted",
 }
 
+PRINT_REMAINING_TIME_KEYS = ("time", "remainTime", "remaining", "remainingTime")
+
 FILAMENT_STATE_LABELS = {
     "unknown": "Unknown",
     "loaded": "Loaded",
@@ -250,6 +252,7 @@ class MqttQueue(Service):
         self._last_state_value = 0
         self._print_started_at = None
         self._last_progress = None
+        self._last_remaining_seconds = None
         self._last_progress_bucket = None
         self._last_interval = None
         self._last_filename = None
@@ -1330,7 +1333,7 @@ class MqttQueue(Service):
                 ha_updates["print_filename"] = filename
 
             elapsed = self._extract_time(payload, ("totalTime", "elapsed", "elapsedTime"))
-            remaining = self._extract_time(payload, ("time", "remainTime", "remaining", "remainingTime"))
+            remaining = self._extract_time(payload, PRINT_REMAINING_TIME_KEYS)
             if elapsed is not None:
                 ha_updates["time_elapsed"] = elapsed
             if remaining is not None:
@@ -1622,6 +1625,9 @@ class MqttQueue(Service):
             return
 
 
+        remaining = self._extract_time(payload, PRINT_REMAINING_TIME_KEYS)
+        if remaining is not None and remaining >= 0:
+            self._last_remaining_seconds = remaining
         self._emit_progress(payload, progress)
         self._last_progress = progress
 
@@ -1655,7 +1661,7 @@ class MqttQueue(Service):
 
     def _build_payload(self, payload, progress, failure_reason=None):
         elapsed = self._extract_time(payload, ("totalTime", "elapsed", "elapsedTime"))
-        remaining = self._extract_time(payload, ("time", "remainTime", "remaining", "remainingTime"))
+        remaining = self._extract_time(payload, PRINT_REMAINING_TIME_KEYS)
         duration = None
         if elapsed is not None and remaining is not None:
             duration = elapsed + remaining
@@ -1741,6 +1747,7 @@ class MqttQueue(Service):
                 "preparing": self.is_preparing_print,
                 "started_at": self._print_started_at,
                 "last_progress": self._last_progress,
+                "remaining_seconds": self._last_remaining_seconds,
                 "last_filename": self._last_filename,
                 "last_task_id": self._last_task_id,
                 "failure_sent": self._failure_sent,
@@ -1756,6 +1763,7 @@ class MqttQueue(Service):
             },
             "telemetry": {
                 "fan_speed": self._fan_speed,
+                "age_seconds": max(0, time.time() - self._last_message_time) if self._last_message_time else None,
             },
             "z_offset": self.get_z_offset_state(),
             "filament": {

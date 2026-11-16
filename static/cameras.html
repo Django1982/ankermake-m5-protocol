@@ -22,11 +22,25 @@
                         {{ "FFmpeg is required" if camera.mode == "unavailable" else "Connecting…" }}
                     </span>
                 </div>
-                {% if camera.mode == "video" %}
-                <video class="camera-tile-media" autoplay muted playsinline aria-label="{{ camera.name }} live camera"></video>
-                {% elif camera.mode in ("stream", "frame") %}
-                <img class="camera-tile-media" alt="{{ camera.name }} camera preview" hidden>
-                {% endif %}
+                <div class="camera-tile-view">
+                    {% if camera.mode == "video" %}
+                    <video class="camera-tile-media" autoplay muted playsinline aria-label="{{ camera.name }} live camera"></video>
+                    {% elif camera.mode in ("stream", "frame") %}
+                    <img class="camera-tile-media" alt="{{ camera.name }} camera preview" hidden>
+                    {% endif %}
+                    <div class="camera-tile-overlay" role="group" aria-label="{{ camera.name }} printer status">
+                        <div class="d-flex align-items-baseline gap-2">
+                            <strong class="flex-shrink-0" data-print-state>Loading printer status…</strong>
+                            <span class="text-truncate" data-print-file hidden></span>
+                        </div>
+                        <div class="camera-tile-metrics" data-print-metrics hidden>
+                            <span>Nozzle <strong data-nozzle>—</strong></span>
+                            <span>Bed <strong data-bed>—</strong></span>
+                            <span data-print-progress hidden></span>
+                            <span data-print-remaining hidden></span>
+                        </div>
+                    </div>
+                </div>
             </section>
             {% else %}
             <p class="text-body-secondary">No printer cameras are configured.</p>

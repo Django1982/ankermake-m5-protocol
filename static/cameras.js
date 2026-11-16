@@ -113,6 +113,92 @@ function watchExternalCamera(image, tile, setStatus) {
     };
 }
 
+const printerStateLabels = {
+    idle: "Idle",
+    preparing: "Preparing",
+    pre_print: "Preparing",
+    printing: "Printing",
+    paused: "Paused",
+    failed: "Print failed",
+};
+
+function formatCameraTemperature(current, target) {
+    if (!Number.isFinite(current)) return "—";
+    const measured = Math.round(current);
+    return Number.isFinite(target) && target > 0
+        ? `${measured} / ${Math.round(target)} °C`
+        : `${measured} °C`;
+}
+
+function formatCameraTimeLeft(seconds) {
+    if (!Number.isFinite(seconds) || seconds <= 0) return "Time left unavailable";
+    const minutes = Math.ceil(seconds / 60);
+    const hours = Math.floor(minutes / 60);
+    return `${hours ? `${hours}h ` : ""}${minutes % 60}m left`;
+}
+
+function watchPrinterStatus(tile) {
+    const stateLabel = tile.querySelector("[data-print-state]");
+    const file = tile.querySelector("[data-print-file]");
+    const metrics = tile.querySelector("[data-print-metrics]");
+    const nozzle = tile.querySelector("[data-nozzle]");
+    const bed = tile.querySelector("[data-bed]");
+    const progress = tile.querySelector("[data-print-progress]");
+    const remaining = tile.querySelector("[data-print-remaining]");
+    const params = new URLSearchParams({ printer_index: tile.dataset.cameraIndex });
+    let stopped = false;
+    let timer;
+    let request;
+
+    function render(data) {
+        const age = data?.telemetry?.age_seconds;
+        const available = data?.print && Number.isFinite(age) && age <= 30;
+        const job = available ? data.print : null;
+        const jobActive = job && (job.active || job.pending_start);
+        const filename = jobActive ? job.last_filename : "";
+
+        stateLabel.textContent = job ? (printerStateLabels[job.print_state] || "Unknown status") : "Printer status unavailable";
+        file.textContent = filename || "";
+        file.title = file.textContent;
+        file.hidden = !filename;
+        metrics.hidden = !available;
+        if (!available) return;
+
+        const temp = data.temperature || {};
+        nozzle.textContent = formatCameraTemperature(temp.nozzle, temp.nozzle_target);
+        bed.textContent = formatCameraTemperature(temp.bed, temp.bed_target);
+        progress.hidden = !jobActive || !Number.isFinite(job.last_progress);
+        progress.textContent = progress.hidden ? "" : `${Math.round(job.last_progress)}% complete`;
+        remaining.hidden = !jobActive;
+        remaining.textContent = jobActive ? formatCameraTimeLeft(job.remaining_seconds) : "";
+    }
+
+    async function refresh() {
+        request = new AbortController();
+        const timeout = setTimeout(() => request.abort(), 8000);
+        try {
+            const response = await fetch(`/api/printer/runtime-state?${params}`, {
+                cache: "no-store",
+                signal: request.signal,
+            });
+            const data = response.ok ? await response.json() : null;
+            if (!stopped) render(data);
+        } catch (error) {
+            if (!stopped) render(null);
+        } finally {
+            clearTimeout(timeout);
+            if (!stopped) timer = setTimeout(refresh, 5000);
+        }
+    }
+
+    refresh();
+    return () => {
+        stopped = true;
+        clearTimeout(timer);
+        request.abort();
+    };
+}
+
 let stopWatching = [];
 window.addEventListener("pageshow", () => {
     for (const tile of document.querySelectorAll("[data-camera-index]")) {
@@ -124,6 +210,7 @@ window.addEventListener("pageshow", () => {
         const image = tile.querySelector("img");
         if (video) stopWatching.push(watchPrinterCamera(video, tile.dataset.cameraIndex, setStatus));
         if (image) stopWatching.push(watchExternalCamera(image, tile, setStatus));
+        stopWatching.push(watchPrinterStatus(tile));
     }
 });
 window.addEventListener("pagehide", () => {
