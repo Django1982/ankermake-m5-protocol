@@ -635,6 +635,10 @@ Do not call this during an active print.
 
 ## Firewall / ufw
 
+### Windows
+
+On a Windows ankerctl host, open **Setup → Windows → Windows Firewall** and select the printer. Download the helper, open it on the PC that runs ankerctl, and approve the Windows administrator prompt. The helper allows incoming UDP from that printer's saved IP for the ankerctl executable on the adapter Windows uses to reach it. Back in the web UI, select **Test connection**.
+
 LAN sessions, IP probes, and discovery each use their own OS-assigned local UDP port. This allows a timelapse on one printer to continue while another printer receives an upload. The remote printer port remains UDP `32108`.
 
 Earlier versions bound all LAN sockets to local port `32108` for firewall compatibility. Those sockets could consume each other's replies, so a rule allowing only destination port `32108` no longer covers replies to the current client.

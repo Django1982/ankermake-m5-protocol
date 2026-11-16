@@ -1,3 +1,6 @@
+import base64
+import json
+import re
 from contextlib import contextmanager
 from datetime import datetime
 from types import SimpleNamespace
@@ -410,6 +413,65 @@ def test_launcher_bat_download_uses_requested_install_dir():
     assert r'set "ANKERCTL_DIR=C:\Users\TestUser\Documents\GitHub\ankermake-m5-protocol"' in body
     assert r"py .\ankerctl.py webserver run" in body
     assert r"python .\ankerctl.py webserver run" in body
+
+
+def test_windows_firewall_download_uses_only_the_selected_printers_config(monkeypatch):
+    config = _base_config()
+    second = _printer("SN2", "Second")
+    second.ip_addr = "192.168.1.25"
+    config.printers.append(second)
+    old, old_svc, _, _ = _install_app_state(cfg=config)
+    monkeypatch.setattr("web.windows_firewall.available", lambda: True)
+    monkeypatch.setattr("web.windows_firewall.host_name", lambda: "ANKER-HOST")
+    monkeypatch.setattr("web.windows_firewall.process_image", lambda: r"C:\Ankerctl\python.exe")
+    headers = {"X-Api-Key": "secret-key-123456"}
+    route = "/api/settings/windows-firewall/download"
+
+    try:
+        client = app.test_client()
+        assert client.post(route, query_string={"printer_index": 1}).status_code == 401
+        assert client.post(route, query_string={"printer_index": 20}, headers=headers).status_code == 400
+        response = client.post(route, query_string={"printer_index": 1}, headers=headers,
+                               json={"address": "10.0.0.1", "program": "someone-elses.exe"})
+        second.ip_addr = None
+        assert client.post(route, query_string={"printer_index": 1}, headers=headers).status_code == 400
+    finally:
+        _restore_app_state(old, old_svc)
+
+    assert response.status_code == 200
+    assert 'filename="ankerctl-firewall-setup.cmd"' in response.headers["Content-Disposition"]
+    assert response.headers["Cache-Control"] == "no-store"
+    encoded = re.search(rb"FromBase64String\('([A-Za-z0-9+/=]+)'\)", response.data)[1]
+    payload = json.loads(base64.b64decode(encoded))
+    assert payload == {
+        "computer": "ANKER-HOST",
+        "address": "192.168.1.25",
+        "program": r"C:\Ankerctl\python.exe",
+        "rule_name": payload["rule_name"],
+    }
+    assert payload["rule_name"].startswith("Ankerctl-LanUdp-")
+
+
+def test_windows_firewall_connection_test_tries_interface_broadcast(monkeypatch):
+    old, old_svc, config, _ = _install_app_state()
+    checks = []
+
+    def probe(printer, address, *, broadcast=False):
+        checks.append((printer, address, broadcast))
+        return broadcast
+
+    monkeypatch.setattr("web.windows_firewall.available", lambda: True)
+    monkeypatch.setattr("cli.pppp.probe_printer_ip", probe)
+    try:
+        response = app.test_client().post(
+            "/api/settings/windows-firewall/test?printer_index=0",
+            headers={"X-Api-Key": "secret-key-123456"},
+        )
+    finally:
+        _restore_app_state(old, old_svc)
+
+    assert response.get_json() == {"reachable": True}
+    assert checks == [(config.printers[0], "192.168.1.10", False), (config.printers[0], "192.168.1.10", True)]
 
 
 def test_filament_service_settings_endpoints_persist_manual_and_legacy_modes():

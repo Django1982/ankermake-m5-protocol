@@ -82,6 +82,25 @@ def test_forward_to_ha_updates_temperatures_and_progress():
     assert any(update.get("print_progress") == 50 and update.get("print_filename") == "cube.gcode" for update in ha_updates)
 
 
+def test_runtime_state_tracks_print_time_remaining_and_clears_it_on_completion():
+    global ha_updates, history_calls, timelapse_calls, events
+    ha_updates, history_calls, timelapse_calls, events = [], [], [], []
+    queue = _queue()
+
+    queue._handle_notification({"commandType": 1001, "progress": 30, "name": "cube.gcode", "time": 1800})
+    assert queue.get_state()["print"]["remaining_seconds"] == 1800
+
+    queue._handle_notification({"commandType": 1001, "progress": 35, "name": "cube.gcode"})
+    assert queue.get_state()["print"]["remaining_seconds"] == 1800
+    queue._handle_notification({"commandType": 1001, "progress": 40, "name": "cube.gcode", "remainingTime": 1500})
+    assert queue.get_state()["print"]["remaining_seconds"] == 1500
+
+    queue._handle_notification({"commandType": 1001, "progress": 100, "name": "cube.gcode", "time": 0})
+    state = queue.get_state()["print"]
+    assert state["active"] is False
+    assert state["remaining_seconds"] is None
+
+
 def test_forward_to_ha_keeps_local_temperature_state_when_ha_is_disabled():
     global ha_updates, history_calls, timelapse_calls, events
     ha_updates, history_calls, timelapse_calls, events = [], [], [], []

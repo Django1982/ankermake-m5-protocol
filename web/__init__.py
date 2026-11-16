@@ -269,6 +269,7 @@ import web.camera
 import web.platform
 import web.timelapse_settings
 import web.util
+import web.windows_firewall
 
 import cli.util
 import cli.config
@@ -775,11 +776,11 @@ def borrow_pppp(printer_index=None, ready=True):
     raise RuntimeError("No pppp service candidates available")
 
 
-def stream_mqtt(printer_index=None, maxsize=0):
+def stream_mqtt(printer_index=None, maxsize=0, **stream_options):
     last_error = None
     for name in _mqtt_service_candidates(printer_index):
         try:
-            return app.svc.stream(name, maxsize=maxsize)
+            return app.svc.stream(name, maxsize=maxsize, **stream_options)
         except (AssertionError, KeyError, AttributeError) as err:
             last_error = err
             continue
@@ -816,7 +817,7 @@ def borrow_videoqueue(printer_index=None):
     raise RuntimeError("No videoqueue service candidates available")
 
 
-def stream_videoqueue(printer_index=None, maxsize=0):
+def stream_videoqueue(printer_index=None, maxsize=0, **stream_options):
     ordered_names = [resolve_video_service_name(printer_index)]
     ordered_names.extend(
         name for name in _video_service_candidates(printer_index)
@@ -825,7 +826,7 @@ def stream_videoqueue(printer_index=None, maxsize=0):
     last_error = None
     for name in ordered_names:
         try:
-            return app.svc.stream(name, maxsize=maxsize)
+            return app.svc.stream(name, maxsize=maxsize, **stream_options)
         except (AssertionError, KeyError, AttributeError) as err:
             last_error = err
             continue
@@ -2379,7 +2380,11 @@ def mqtt(sock):
             log.info("/ws/mqtt: new client connected, cancelling MQTT reconnect back-off")
             _mqtt_svc_ref.reset_reconnect_backoff()
     try:
-        for data in stream_mqtt(printer_index, maxsize=MQTT_STREAM_QUEUE_MAX):
+        for data in stream_mqtt(
+            printer_index,
+            maxsize=MQTT_STREAM_QUEUE_MAX,
+            keep_streaming=lambda: getattr(sock, "connected", True),
+        ):
             log.debug(f"MQTT message: {data}")
             sock.send(json.dumps(data))
     except ConnectionClosed:
@@ -2396,9 +2401,8 @@ def video(sock):
     """
     Handles receiving and sending messages on the 'videoqueue' stream service through websocket.
 
-    Each connected client expresses intent to receive video by connecting here.
-    video_enabled is set True on connect and cleared when the last client disconnects,
-    so multiple tabs can independently enable/disable without interfering.
+    Each connection holds its own viewer reference to the requested printer's
+    video service, alongside any explicit live view or timelapse request.
     """
     if not app.config["login"]:
         return
@@ -2414,7 +2418,11 @@ def video(sock):
 
     vq.viewer_connected()
     try:
-        for msg in stream_videoqueue(printer_index, maxsize=VIDEO_STREAM_QUEUE_MAX):
+        for msg in stream_videoqueue(
+            printer_index,
+            maxsize=VIDEO_STREAM_QUEUE_MAX,
+            keep_streaming=lambda: getattr(sock, "connected", True),
+        ):
             payload = getattr(msg, "data", None)
             if not payload:
                 continue
@@ -2427,11 +2435,7 @@ def video(sock):
         log.warning(f"/ws/video error: {exc}")
         log.info("Stack trace:", exc_info=True)
     finally:
-        # /ws/video is only a consumer of the shared video service.
-        # The explicit owner of video enable/disable is /ws/ctrl via
-        # {"video_enabled": true/false}.  Do not tear the service down here,
-        # because transient websocket disconnects or reconnects would otherwise
-        # stop live video for the whole app.
+        # Release this viewer's reference. Timelapse and live view keep their own holds.
         try:
             vq.viewer_disconnected()
         except Exception as exc:
@@ -2534,8 +2538,9 @@ def pppp_state(sock):
 
     States emitted:
       "dormant"      — service not running (video/timelapse not active)
-      "connected"    — service running and PPPP handshake complete, or probe succeeded
-      "disconnected" — service was connected but the connection was lost, or probe failed
+      "connecting"   — service attempting its first PPPP handshake
+      "connected"    — PPPP handshake complete (service) or printer reachable (probe)
+      "disconnected" — session failed or was lost (service), or probe failed (probe)
     """
     if not app.config["login"]:
         log.info("Websocket connection rejected: no printer configured (use 'config import' or 'config login')")
@@ -2569,7 +2574,7 @@ def pppp_state(sock):
         _maybe_start_pppp_probe("first client", printer_index=printer_index)
 
     try:
-        while True:
+        while getattr(sock, "connected", True):
             now = time.time()
 
             # Passive read — no ref-count increment, never starts the service.
@@ -2584,6 +2589,10 @@ def pppp_state(sock):
                 with app.pppp_probe_lock:
                     probe["result"] = None
                     probe["fail_count"] = 0
+            elif pppp is not None and getattr(pppp, "wanted", False):
+                failed = pppp_was_connected or getattr(pppp, "_connect_failure_count", 0) > 0
+                current_status = "disconnected" if failed else "connecting"
+                current_source = "service"
             else:
                 # Check MQTT staleness and detect recovery transition
                 mqtt_svc = get_mqtt_service(printer_index)
@@ -2641,15 +2650,9 @@ def pppp_state(sock):
                 elif probe_result is False:
                     current_status = "disconnected"
                     current_source = "probe"
-                elif pppp is not None and getattr(pppp, "wanted", False) and pppp_was_connected:
-                    # Service is still wanted but lost its PPPP connection.
-                    current_status = "disconnected"
-                    current_source = "service"
                 else:
-                    # Service not running or connecting for the first time → dormant.
                     current_status = "dormant"
-                    if pppp is None or not getattr(pppp, "wanted", False):
-                        pppp_was_connected = False
+                    pppp_was_connected = False
 
             if (
                 current_status != last_status
@@ -2898,7 +2901,39 @@ def app_root():
             printer_index_locked=app.config.get("printer_index_locked", False),
             unsupported_device=app.config.get("unsupported_device", False),
             ankerctl_root=os.path.realpath(ROOT_DIR),
+            windows_firewall_host=web.windows_firewall.host_name() if web.windows_firewall.available() else None,
         )
+
+
+@app.get("/cameras")
+def app_cameras():
+    cameras = []
+    config = app.config.get("config")
+    if config and app.config.get("login"):
+        ffmpeg_available = _ffmpeg_available()
+        with config.open() as cfg:
+            for index, printer in enumerate(getattr(cfg, "printers", []) or []):
+                if printer.model in UNSUPPORTED_PRINTERS:
+                    continue
+                settings = _resolve_camera_settings(cfg, printer_index=index)
+                source = settings.get("effective_source")
+                if source == web.camera.CAMERA_SOURCE_PRINTER:
+                    mode = "video"
+                elif source == web.camera.CAMERA_SOURCE_EXTERNAL:
+                    if not ffmpeg_available:
+                        mode = "unavailable"
+                    else:
+                        mode = "stream" if settings["external"]["stream_url"] else "frame"
+                else:
+                    continue
+                cameras.append({
+                    "index": index,
+                    "name": printer.name or f"Printer {index + 1}",
+                    "mode": mode,
+                    "refresh_sec": settings["external"]["refresh_sec"],
+                })
+
+    return render_template("cameras.html", cameras=cameras)
 
 
 @app.get("/api/health")
@@ -3534,6 +3569,43 @@ def app_api_settings_launcher_bat():
             "Content-Disposition": 'attachment; filename="ankerctl-launcher.bat"',
         },
     )
+
+
+@app.post("/api/settings/windows-firewall/<any(download,test):action>")
+def app_api_windows_firewall(action):
+    if not web.windows_firewall.available():
+        return {"error": "Windows Firewall setup is available on Windows hosts."}, 404
+
+    printer_index = request.args.get("printer_index", type=int)
+    config = app.config.get("config")
+    if printer_index is None or not config or not app.config.get("login"):
+        return {"error": "Select a configured printer first."}, 400
+    with config.open() as cfg:
+        printers = getattr(cfg, "printers", [])
+        if not 0 <= printer_index < len(printers) or printers[printer_index].model in UNSUPPORTED_PRINTERS:
+            return {"error": "Select a supported printer."}, 400
+        printer = printers[printer_index]
+
+    try:
+        address = web.windows_firewall.printer_address(printer.ip_addr)
+        if action == "download":
+            return Response(
+                web.windows_firewall.build_helper(printer, address),
+                mimetype="application/octet-stream",
+                headers={
+                    "Content-Disposition": 'attachment; filename="ankerctl-firewall-setup.cmd"',
+                    "Cache-Control": "no-store",
+                },
+            )
+        reachable = cli.pppp.probe_printer_ip(printer, address) or cli.pppp.probe_printer_ip(
+            printer, address, broadcast=True
+        )
+    except ValueError as exc:
+        return {"error": str(exc)}, 400
+    except OSError as exc:
+        log.warning("Windows Firewall %s failed for printer index %s: %s", action, printer_index, exc)
+        return {"error": "Windows could not complete the request. Check the host network and server log."}, 503
+    return {"reachable": reachable}
 
 
 @app.get("/api/settings/timelapse")
@@ -5954,6 +6026,7 @@ def add_security_headers(response):
 # GET endpoints that modify state or expose sensitive debug information
 # and therefore require auth even though they are GET requests.
 _PROTECTED_GET_PATHS = {
+    "/cameras",
     "/api/ankerctl/server/reload",
     "/api/console/logs",
     "/api/debug/state",

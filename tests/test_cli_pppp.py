@@ -8,7 +8,7 @@ import pytest
 import cli.pppp
 
 from libflagship.pppp import Duid, PktPunchPkt
-from libflagship.ppppapi import AnkerPPPPApi, FileUploadInfo
+from libflagship.ppppapi import AnkerPPPPApi, FileUploadInfo, PPPPState
 
 
 def _duid():
@@ -40,7 +40,7 @@ def _patch_pppp_open_env(monkeypatch, make_api):
     )
     monkeypatch.setattr(
         "cli.pppp.AnkerPPPPApi.open_lan",
-        lambda duid, host: attempts.append(True) or make_api(),
+        lambda duid, host, *, broadcast=False: attempts.append(broadcast) or make_api(broadcast),
     )
     return attempts
 
@@ -76,24 +76,36 @@ class _NeverConnectingApi:
 
 
 def test_pppp_open_retries_after_explicit_close(monkeypatch):
-    attempts = _patch_pppp_open_env(monkeypatch, lambda: _NeverConnectingApi(stopped=True))
+    attempts = _patch_pppp_open_env(monkeypatch, lambda broadcast: _NeverConnectingApi(stopped=True))
 
     with pytest.raises(ConnectionRefusedError):
         cli.pppp.pppp_open(_FakeOpenConfig(), printer_index=0, timeout=2.0)
 
     assert len(attempts) > 1
+    assert not any(attempts)
 
 
 def test_pppp_open_retries_when_connection_silently_never_completes(monkeypatch):
     # Regression: a silent non-completing attempt (no CLOSE packet, state
     # never reaches Connected) used to consume the entire deadline in the
     # first attempt's wait loop, so the retry loop never got a second try.
-    attempts = _patch_pppp_open_env(monkeypatch, lambda: _NeverConnectingApi(stopped=False))
+    attempts = _patch_pppp_open_env(monkeypatch, lambda broadcast: _NeverConnectingApi(stopped=False))
 
     with pytest.raises(ConnectionRefusedError):
         cli.pppp.pppp_open(_FakeOpenConfig(), printer_index=0, timeout=8.0)
 
-    assert len(attempts) > 1
+    assert attempts[:2] == [False, True]
+
+
+@pytest.mark.parametrize("timeout", [None, 60.0])
+def test_pppp_open_connects_using_broadcast_when_direct_discovery_is_silent(monkeypatch, timeout):
+    direct = _NeverConnectingApi(stopped=False)
+    fallback = _NeverConnectingApi(stopped=False)
+    fallback.state = PPPPState.Connected
+    attempts = _patch_pppp_open_env(monkeypatch, lambda broadcast: fallback if broadcast else direct)
+
+    assert cli.pppp.pppp_open(_FakeOpenConfig(), printer_index=0, timeout=timeout) is fallback
+    assert attempts == [False, True]
 
 
 def test_probe_printer_ip_retries_before_succeeding(monkeypatch):

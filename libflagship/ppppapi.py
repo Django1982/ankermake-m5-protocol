@@ -25,7 +25,7 @@ PPPP_SOCKET_SNDBUF = 256 * 1024
 _REMOTE_CLOSE_LOG_COOLDOWN = 10.0
 
 
-def _configure_udp_socket(sock, *, broadcast=False, local_port=None):
+def _configure_udp_socket(sock, *, broadcast=False, local_port=None, local_host=""):
     for opt_name, value in (
         ("SO_RCVBUF", PPPP_SOCKET_RCVBUF),
         ("SO_SNDBUF", PPPP_SOCKET_SNDBUF),
@@ -46,7 +46,7 @@ def _configure_udp_socket(sock, *, broadcast=False, local_port=None):
 
     if local_port is not None:
         try:
-            sock.bind(('', local_port))
+            sock.bind((local_host, local_port))
         except OSError as e:
             import errno
             if e.errno == errno.EADDRINUSE:
@@ -342,9 +342,10 @@ class AnkerPPPPBaseApi(Thread):
         self.sock = sock
         self.duid = duid
         self.addr = addr
-        # Only directed LAN sessions pin the peer IP. Discovery must accept
+        # Only LAN sessions pin the peer IP. Discovery must accept
         # multiple printers, and WAN sessions retain their relay behavior.
         self._lan_peer_host = None
+        self._lan_search_addr = None
 
         self.state = PPPPState.Idle
         self.chans = [Channel(n) for n in range(8)]
@@ -361,16 +362,25 @@ class AnkerPPPPBaseApi(Thread):
         return cls(sock, duid, addr=(host, port))
 
     @classmethod
-    def open_lan(cls, duid, host):
+    def open_lan(cls, duid, host, *, broadcast=False):
         peer_host = socket.gethostbyname(host)
-        sock = _configure_udp_socket(
-            socket.socket(socket.AF_INET, socket.SOCK_DGRAM),
-            # Each session/probe needs its own reply port. Sharing 32108 lets
-            # a camera socket consume another printer's upload responses.
-            local_port=0,
-        )
+        local_host = ""
+        if broadcast:
+            # Send discovery on the interface used to reach this printer.
+            with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as route:
+                route.connect((peer_host, PPPP_LAN_PORT))
+                local_host = route.getsockname()[0]
+        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        try:
+            # Give each session its own reply port so responses stay isolated.
+            _configure_udp_socket(sock, broadcast=broadcast, local_port=0, local_host=local_host)
+        except OSError:
+            sock.close()
+            raise
         api = cls(sock, duid, addr=(peer_host, PPPP_LAN_PORT))
         api._lan_peer_host = peer_host
+        if broadcast:
+            api._lan_search_addr = ("255.255.255.255", PPPP_LAN_PORT)
         return api
 
     @classmethod
@@ -389,7 +399,7 @@ class AnkerPPPPBaseApi(Thread):
 
     def connect_lan_search(self):
         self.state = PPPPState.Connecting
-        self.send(PktLanSearch())
+        self.send(PktLanSearch(), addr=self._lan_search_addr)
 
     def set_dumper(self, dumper):
         self.dumper = dumper
@@ -483,6 +493,8 @@ class AnkerPPPPBaseApi(Thread):
 
         elif msg.type == Type.PUNCH_PKT:
             if self.state == PPPPState.Connecting:
+                if self._lan_search_addr and str(msg.duid) != str(self.duid):
+                    return
                 self.send(PktClose())
                 self.send(PktP2pRdy(self.duid))
 

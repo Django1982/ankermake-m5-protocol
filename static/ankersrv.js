@@ -1247,10 +1247,15 @@ $(function () {
      * This class wraps a WebSocket, and makes it automatically reconnect if the
      * connection is lost.
      */
-    function setConnectionBadge(selector, tone) {
-        $(selector)
+    function setConnectionBadge(selector, tone, status) {
+        if (!selector) return;
+        const badge = $(selector);
+        const label = `${badge.text()} · ${status}`;
+        if (badge.attr("title") === label && badge.hasClass(`text-bg-${tone}`)) return;
+        badge
             .removeClass("text-bg-success text-bg-danger text-bg-secondary text-bg-warning")
-            .addClass(`text-bg-${tone}`);
+            .addClass(`text-bg-${tone}`)
+            .attr({ title: label, "aria-label": label });
     }
 
     class AutoWebSocket {
@@ -1259,19 +1264,19 @@ $(function () {
             url,
             badge = null,
             open = null,
-            opened = null,
             close = null,
             error = null,
             message = null,
             binary = false,
             reconnect = 1000,
+            activityTimeout = 0,
+            activityTimeoutStatus = "No data received",
         }) {
             this.name = name;
             this.url = url;
             this.badge = badge;
             this.reconnect = reconnect;
             this.open = open;
-            this.opened = opened;
             this.close = close;
             this.error = error;
             this.message = message;
@@ -1279,15 +1284,33 @@ $(function () {
             this.ws = null;
             this.is_open = false;
             this.autoReconnect = reconnect !== false;
+            this.activityTimeout = activityTimeout;
+            this.activityTimeoutStatus = activityTimeoutStatus;
+            this.activityTimer = null;
         }
 
         _open() {
-            setConnectionBadge(this.badge, "warning");
+            this._watchActivity();
             if (this.open) this.open(this.ws);
         }
 
+        _watchActivity() {
+            clearTimeout(this.activityTimer);
+            if (this.activityTimeout) {
+                this.activityTimer = setTimeout(() => {
+                    setConnectionBadge(this.badge, "danger", this.activityTimeoutStatus);
+                }, this.activityTimeout);
+            }
+        }
+
+        reportActivity(status) {
+            setConnectionBadge(this.badge, "success", status);
+            this._watchActivity();
+        }
+
         _close() {
-            setConnectionBadge(this.badge, "danger");
+            clearTimeout(this.activityTimer);
+            setConnectionBadge(this.badge, "danger", "Disconnected");
             console.log(`${this.name} close`);
             this.is_open = false;
             const old = this.ws;
@@ -1300,15 +1323,8 @@ $(function () {
 
         _error() {
             console.log(`${this.name} error`);
-            const old = this.ws;
-            this.ws = null;
-            this.is_open = false;
-            try {
-                if (old) {
-                    old.close();
-                }
-            } catch (_) {}
-            if (this.error) this.error(old);
+            setConnectionBadge(this.badge, "danger", "Connection failed");
+            if (this.error) this.error(this.ws);
         }
 
         _message(event) {
@@ -1328,12 +1344,16 @@ $(function () {
                     // Not JSON — continue to normal message handling
                 }
             }
-            if (!this.is_open) {
-                setConnectionBadge(this.badge, "success");
-                this.is_open = true;
-                if (this.opened) this.opened(event);
-            }
+            this.is_open = true;
             if (this.message) this.message(event);
+        }
+
+        disconnect() {
+            this.autoReconnect = false;
+            if (!this.ws) return;
+            const ws = this.ws;
+            this._close();
+            ws.close();
         }
 
         connect() {
@@ -1343,12 +1363,16 @@ $(function () {
             if (this.ws) {
                 return;
             }
-            var ws = (this.ws = new WebSocket(this.url));
+            setConnectionBadge(this.badge, "warning", "Connecting");
+            const ws = (this.ws = new WebSocket(this.url));
             if (this.binary) ws.binaryType = "arraybuffer";
-            ws.addEventListener("open", this._open.bind(this));
-            ws.addEventListener("close", this._close.bind(this));
-            ws.addEventListener("error", this._error.bind(this));
-            ws.addEventListener("message", this._message.bind(this));
+            const onCurrentSocket = (handler) => (event) => {
+                if (this.ws === ws) handler.call(this, event);
+            };
+            ws.addEventListener("open", onCurrentSocket(this._open));
+            ws.addEventListener("close", onCurrentSocket(this._close));
+            ws.addEventListener("error", onCurrentSocket(this._error));
+            ws.addEventListener("message", onCurrentSocket(this._message));
         }
     }
 
@@ -1529,14 +1553,10 @@ $(function () {
         name: "mqtt socket",
         url: `${location.protocol.replace("http", "ws")}//${location.host}/ws/mqtt?printer_index=${encodeURIComponent(getActivePrinterIndex())}`,
         badge: "#badge-mqtt",
-
-        opened: function () {
-            _mqttLastMessageAt = Date.now();
-            _updateMqttReconnectButton();
-        },
+        activityTimeout: 30000,
+        activityTimeoutStatus: "No printer messages for 30 seconds",
 
         message: function (ev) {
-            _mqttLastMessageAt = Date.now();
             let data = null;
             try {
                 data = JSON.parse(ev.data);
@@ -1544,6 +1564,10 @@ $(function () {
                 console.warn("mqtt socket: failed to parse message", err);
                 return;
             }
+            if (!data || data.commandType == null) return;
+            _mqttLastMessageAt = Date.now();
+            _updateMqttReconnectButton();
+            this.reportActivity("Receiving printer messages");
             if (data.commandType == 1000) {
                 if (Number(data.subType) === 2 && Number(data.value) === 6) {
                     _filamentStatus.pendingRunout = false;
@@ -1769,106 +1793,41 @@ $(function () {
         badge: "#badge-video",
         binary: true,
         reconnect: 2000,
+        activityTimeout: 10000,
+        activityTimeoutStatus: "No video frames for 10 seconds",
 
         open: function () {
-            this.videoQueue = [];
-            this.videoBufferMinPackets = 2;
-            this.videoBufferDelayMs = 120;
-            this.videoBufferMaxPackets = 120;
-            this.videoBufferCatchupPackets = 24;
-            this.videoPumpMaxPacketsPerTick = 24;
-            this.videoBuffering = true;
-            this.jmuxer = new JMuxer({
-                node: "player",
-                mode: "video",
-                flushingTime: 0,
-                fps: 15,
-                // debug: true,
-                onError: function (data) {
-                    console.warn("JMuxer video error", data);
-                },
-            });
-            this.videoPump = window.setInterval(() => {
-                if (!this.jmuxer) return;
-
-                const now = window.performance && window.performance.now ? window.performance.now() : Date.now();
-                if (this.videoBuffering) {
-                    const firstPacket = this.videoQueue[0];
-                    const firstPacketAge = firstPacket ? now - firstPacket.receivedAt : 0;
-                    if (
-                        this.videoQueue.length < this.videoBufferMinPackets &&
-                        firstPacketAge < this.videoBufferDelayMs
-                    ) {
-                        return;
-                    }
-                    this.videoBuffering = false;
-                }
-
-                let fedPackets = 0;
-                while (this.videoQueue.length && fedPackets < this.videoPumpMaxPacketsPerTick) {
-                    const packet = this.videoQueue[0];
-                    const packetAge = now - packet.receivedAt;
-                    if (packetAge < this.videoBufferDelayMs && this.videoQueue.length <= this.videoBufferMinPackets) {
-                        break;
-                    }
-                    this.videoQueue.shift();
-                    try {
-                        this.jmuxer.feed({
-                            video: new Uint8Array(packet.data),
-                        });
-                    } catch (err) {
-                        console.log({ type: "video", name: err?.name || "feed", error: err?.message || String(err) });
-                        this.videoBuffering = true;
-                        return;
-                    }
-                    fedPackets++;
-                }
-
-                if (!fedPackets && !this.videoQueue.length) {
-                    this.videoBuffering = true;
-                }
-            }, 16);
+            this.player = new AnkerVideoPlayer(videoPlayer);
         },
 
         message: function (event) {
-            if (!(event.data instanceof ArrayBuffer) || event.data.byteLength === 0) {
-                return;
-            }
-            if (!this.videoQueue) {
-                this.videoQueue = [];
-            }
-            const now = window.performance && window.performance.now ? window.performance.now() : Date.now();
-            this.videoQueue.push({
-                // event.data is a fresh ArrayBuffer per message, no copy needed
-                data: event.data,
-                receivedAt: now,
-            });
-            if (this.videoQueue.length > this.videoBufferMaxPackets) {
-                const keepPackets = Math.max(this.videoBufferCatchupPackets, this.videoBufferMinPackets);
-                this.videoQueue.splice(0, this.videoQueue.length - keepPackets);
-                this.videoBuffering = true;
-            }
+            if (!(event.data instanceof ArrayBuffer) || !event.data.byteLength) return;
+            this.reportActivity("Receiving printer video");
+            this.player?.enqueue(event.data);
         },
 
         close: function () {
-            if (this.videoPump) {
-                window.clearInterval(this.videoPump);
-                this.videoPump = null;
-            }
-            this.videoQueue = [];
-            this.videoBuffering = true;
+            if (!this.player) return;
 
-            if (!this.jmuxer) return;
-
-            this.jmuxer.destroy();
-            this.jmuxer = null;
-
-            /* Clear video source (to show loading animation) */
-            $("#player").attr("src", "");
+            this.player.destroy();
+            this.player = null;
             $("#video-resolution").text("Current: -");
-
-            $(this.badge).removeClass("text-bg-warning text-bg-success").addClass("text-bg-danger");
         },
+    });
+
+    const allCamerasLink = document.getElementById("open-all-cameras");
+    let camerasWindow;
+    allCamerasLink?.addEventListener("click", (event) => {
+        if (event.ctrlKey || event.metaKey || event.shiftKey || event.altKey) return;
+
+        if (!camerasWindow || camerasWindow.closed) {
+            camerasWindow = window.open(allCamerasLink.href, "ankerctl-cameras", "popup,width=1280,height=650");
+            if (camerasWindow) camerasWindow.opener = null;
+        }
+        if (camerasWindow) {
+            event.preventDefault();
+            camerasWindow.focus();
+        }
     });
 
     const videoPlayer = document.getElementById("player");
@@ -1891,7 +1850,7 @@ $(function () {
     const ctrlPendingMessages = [];
     function sendCtrlMessage(payload) {
         const message = JSON.stringify(payload);
-        if (sockets.ctrl.ws && sockets.ctrl.ws.readyState === WebSocket.OPEN) {
+        if (sockets.ctrl.is_open && sockets.ctrl.ws?.readyState === WebSocket.OPEN) {
             try {
                 sockets.ctrl.ws.send(message);
                 return true;
@@ -1923,7 +1882,6 @@ $(function () {
         name: "Control socket",
         url: `${location.protocol.replace("http", "ws")}//${location.host}/ws/ctrl?printer_index=${encodeURIComponent(getActivePrinterIndex())}`,
         badge: "#badge-ctrl",
-        opened: flushCtrlMessages,
         message: function (event) {
             let data = null;
             try {
@@ -1931,11 +1889,11 @@ $(function () {
             } catch (err) {
                 return;
             }
-            flushCtrlMessages();
-            if (data.ankerctl) {
-                setConnectionBadge("#badge-ctrl", "warning");
+            if (data?.ankerctl) {
+                setConnectionBadge(this.badge, "success", "Control channel ready");
+                flushCtrlMessages();
             }
-            if (data.video_profile) {
+            if (data?.video_profile) {
                 setVideoProfileActive(data.video_profile);
             }
         },
@@ -1955,19 +1913,17 @@ $(function () {
                 console.warn("pppp socket: failed to parse message", err);
                 return;
             }
-            if (data.status === "connected") {
-                setConnectionBadge(this.badge, "success");
-                if (data.source === "service") {
-                    setConnectionBadge("#badge-ctrl", "success");
-                } else {
-                    setConnectionBadge("#badge-ctrl", "warning");
-                }
+            if (data.status === "connected" && data.source === "service") {
+                setConnectionBadge(this.badge, "success", "LAN session connected");
+            } else if (data.status === "connected" && data.source === "probe") {
+                setConnectionBadge(this.badge, "secondary", "Printer reachable, LAN session idle");
+            } else if (data.status === "connecting") {
+                setConnectionBadge(this.badge, "warning", "Opening LAN session");
             } else if (data.status === "disconnected") {
-                setConnectionBadge(this.badge, "warning");
-                setConnectionBadge("#badge-ctrl", "warning");
+                const status = data.source === "probe" ? "Printer did not answer the LAN probe" : "LAN session disconnected";
+                setConnectionBadge(this.badge, "danger", status);
             } else if (data.status === "dormant") {
-                setConnectionBadge(this.badge, "secondary");
-                setConnectionBadge("#badge-ctrl", "warning");
+                setConnectionBadge(this.badge, "secondary", "LAN session idle");
             }
         },
     });
@@ -2067,13 +2023,8 @@ $(function () {
             $("#vplayer").hide();
             $("#video-toggle").html('<i class="bi bi-camera-video"></i> Enable Video');
             sendCtrlMessage({ video_enabled: false });
-            sockets.video.autoReconnect = false;
-            if (sockets.video.ws) {
-                try {
-                    sockets.video.ws.close();
-                } catch (_) {}
-                sockets.video.ws = null;
-            }
+            sockets.video.disconnect();
+            setConnectionBadge("#badge-video", "secondary", "Printer video off");
             $("#video-resolution").text("Current: -");
         }
         renderCameraUi();
@@ -3624,6 +3575,44 @@ $(function () {
             flash_message(`Failed to download launcher: ${err.message || err}`, "danger");
         } finally {
             btn.prop("disabled", false);
+        }
+    });
+
+    $("#windows-firewall-form [data-firewall-action]").on("click", async function () {
+        const action = this.dataset.firewallAction;
+        const printer = $("#windows-firewall-printer");
+        const controls = $("#windows-firewall-form button, #windows-firewall-printer");
+        const status = document.getElementById("windows-firewall-result");
+        status.hidden = false;
+        status.textContent = action === "download" ? "Preparing the helper…" : "Testing the printer from the ankerctl host…";
+        controls.prop("disabled", true);
+        try {
+            const params = new URLSearchParams({ printer_index: printer.val() });
+            const response = await fetch(`/api/settings/windows-firewall/${action}?${params}`, { method: "POST" });
+            if (!response.ok) {
+                const details = await response.json().catch(() => ({}));
+                throw new Error(details.error || `HTTP ${response.status}`);
+            }
+            if (action === "download") {
+                const url = URL.createObjectURL(await response.blob());
+                const link = document.createElement("a");
+                link.href = url;
+                link.download = "ankerctl-firewall-setup.cmd";
+                document.body.appendChild(link);
+                link.click();
+                link.remove();
+                setTimeout(() => URL.revokeObjectURL(url), 1000);
+                status.textContent = "Helper downloaded. Open it on the ankerctl PC.";
+            } else {
+                const result = await response.json();
+                status.textContent = result.reachable
+                    ? "The printer answered LAN discovery. Try the camera or upload again."
+                    : "The printer did not answer. Check its IP in Setup → Printer, then test again.";
+            }
+        } catch (error) {
+            status.textContent = error.message;
+        } finally {
+            controls.prop("disabled", false);
         }
     });
 
@@ -5941,16 +5930,6 @@ $(function () {
                         <i class="bi-${ok ? "check-circle" : "x-circle"}"></i>
                         Last result: ${ok ? "ok" : "fail"} <span class="text-muted">(just now)</span>
                     </span>`);
-                    // Immediately reflect result in the main PPPP badge
-                    if (ok) {
-                        $("#badge-pppp")
-                            .removeClass("text-bg-danger text-bg-warning text-bg-secondary")
-                            .addClass("text-bg-success");
-                    } else {
-                        $("#badge-pppp")
-                            .removeClass("text-bg-success text-bg-warning text-bg-secondary")
-                            .addClass("text-bg-danger");
-                    }
                 } else {
                     resultDiv.html(`<span class="text-danger small">${escapeHtml(data.error || "Error")}</span>`);
                 }
