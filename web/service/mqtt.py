@@ -85,6 +85,10 @@ STORED_FILE_START_CONFIRM_TIMEOUT_SEC = 12.0
 STORED_FILE_ONBOARD_START_CONFIRM_TIMEOUT_SEC = 20.0
 STORED_FILE_LIST_PAGE_SIZE = 47
 RECENT_COMPLETION_GUARD_SEC = 120.0
+# A pending (PREPARING) or pre-print (PRE_PRINT) start can't be re-derived from
+# printer telemetry, so it survives an MQTT reconnect for this long after it
+# was marked. Older ones are dropped as stale.
+PENDING_START_RECONNECT_KEEP_SEC = 900.0
 STORED_FILE_SOURCE_ROOTS = (
     "/tmp/udisk/",
     "/usr/data/local/model/",
@@ -236,7 +240,7 @@ class MqttQueue(Service):
         # next live telemetry, but filament vendor/type has no telemetry source
         # to re-derive from (it's a one-shot value pushed from the GCode header
         # at upload time), so it must not be wiped here or it is lost for good.
-        self._reset_print_state(preserve_filament_metadata=True)
+        self._reset_print_state_for_reconnect()
         self._ha.start()
         self._ha.update_state(mqtt_connected=True)
         self._last_query = 0
@@ -244,6 +248,14 @@ class MqttQueue(Service):
         self._timelapse_start_prompt_window_until = (
             time.monotonic() + TIMELAPSE_START_PROMPT_BOOT_WINDOW_SEC
         )
+
+    def _reset_print_state_for_reconnect(self):
+        """Reset per-connection print state, keeping a recent pending/pre-print
+        start that telemetry can't re-derive (see PENDING_START_RECONNECT_KEEP_SEC)."""
+        pending_start = self._snapshot_pending_start()
+        self._reset_print_state(preserve_filament_metadata=True)
+        if pending_start:
+            self._restore_pending_start(pending_start)
 
     def _reset_print_state(self, preserve_filament_metadata=False):
         self._state = PrintState.IDLE
@@ -266,6 +278,7 @@ class MqttQueue(Service):
         self._last_print_schedule_filename = None
         self._last_print_schedule_seen_at = 0.0
         self._pending_prepare_state_logged = False
+        self._pending_start_marked_at = None
         if not preserve_filament_metadata:
             self._filament_vendor = None
             self._filament_type = None
@@ -571,6 +584,41 @@ class MqttQueue(Service):
             return True
         return False
 
+    _PENDING_START_FIELDS = (
+        "_state",
+        "_last_filename",
+        "_last_task_id",
+        "_pending_archive_info",
+        "_pending_stored_file_path",
+        "_preview_url",
+        "_preview_file_path",
+        "_pending_start_marked_at",
+    )
+
+    def _snapshot_pending_start(self):
+        """Capture a pending/pre-print start so a reconnect doesn't lose it.
+
+        Returns None when there is nothing to keep, or it is older than
+        PENDING_START_RECONNECT_KEEP_SEC.
+        """
+        with self._state_lock:
+            if getattr(self, "_state", None) not in (PrintState.PREPARING, PrintState.PRE_PRINT):
+                return None
+            marked_at = getattr(self, "_pending_start_marked_at", None)
+            if not marked_at or time.monotonic() - marked_at > PENDING_START_RECONNECT_KEEP_SEC:
+                return None
+            return {name: getattr(self, name, None) for name in self._PENDING_START_FIELDS}
+
+    def _restore_pending_start(self, snapshot):
+        with self._state_lock:
+            for name, value in snapshot.items():
+                setattr(self, name, value)
+        log.info(
+            "Kept %s start for %r across MQTT reconnect",
+            snapshot["_state"].value,
+            snapshot.get("_last_filename"),
+        )
+
     def mark_pending_print_start(self, filename=None, task_id=None, archive_info=None):
         with self._state_lock:
             if filename:
@@ -586,6 +634,7 @@ class MqttQueue(Service):
                 }
             self._clear_recent_completion()
             self._state = PrintState.PREPARING
+            self._pending_start_marked_at = time.monotonic()
             self._pending_prepare_state_logged = False
             self._stop_requested = False
         log.info("Marked pending print start for %r", self._last_filename)
@@ -1385,6 +1434,8 @@ class MqttQueue(Service):
             if self._is_preprint_preview_path(file_path) and (self._state == PrintState.PREPARING or self.is_preparing_print):
                 self._state = PrintState.PRE_PRINT
                 self._stop_requested = False
+                if not getattr(self, "_pending_start_marked_at", None):
+                    self._pending_start_marked_at = time.monotonic()
                 log.info("Early print activation via ct 1044")
             return
 

@@ -2129,3 +2129,73 @@ def test_worker_stop_without_timelapse_service():
     queue._ha = SimpleNamespace(update_state=lambda **kwargs: None, stop=lambda: None)
 
     queue.worker_stop()
+
+
+def test_reconnect_keeps_recent_pending_print_start(monkeypatch):
+    """A reconnect between upload and print start must not lose the pending start."""
+    global ha_updates, history_calls, timelapse_calls, events
+    ha_updates, history_calls, timelapse_calls, events = [], [], [], []
+    queue = _queue()
+    now = [1000.0]
+    monkeypatch.setattr("web.service.mqtt.time.monotonic", lambda: now[0])
+
+    queue.mark_pending_print_start("part.gcode")
+    now[0] += 70.0
+    queue._reset_print_state_for_reconnect()
+
+    assert queue._state == PrintState.PREPARING
+    assert queue._last_filename == "part.gcode"
+    assert queue.has_pending_print_start
+
+
+def test_reconnect_keeps_pre_print_and_blocks_pre_print_progress(monkeypatch):
+    """After a reconnect during pre-print, pre-print progress 0->100 is not a print."""
+    global ha_updates, history_calls, timelapse_calls, events
+    ha_updates, history_calls, timelapse_calls, events = [], [], [], []
+    queue = _queue()
+    now = [1000.0]
+    monkeypatch.setattr("web.service.mqtt.time.monotonic", lambda: now[0])
+
+    queue.mark_pending_print_start("part.gcode")
+    queue._state = PrintState.PRE_PRINT  # as set by ct=1044 during prepare
+    now[0] += 60.0
+    queue._reset_print_state_for_reconnect()
+    assert queue._state == PrintState.PRE_PRINT
+
+    for pct in (2500, 9000, 10000):
+        now[0] += 60.0
+        queue._handle_notification({"commandType": 1001, "progress": pct, "name": "part.gcode", "task_id": "t1"})
+
+    assert queue._state == PrintState.PRE_PRINT
+    assert [c for c in history_calls if c[0] == "finish"] == []
+    assert not any(u.get("print_status") == "complete" for u in ha_updates)
+
+
+def test_reconnect_drops_stale_pending_start(monkeypatch):
+    global ha_updates, history_calls, timelapse_calls, events
+    ha_updates, history_calls, timelapse_calls, events = [], [], [], []
+    queue = _queue()
+    now = [1000.0]
+    monkeypatch.setattr("web.service.mqtt.time.monotonic", lambda: now[0])
+
+    queue.mark_pending_print_start("part.gcode")
+    now[0] += 901.0
+    queue._reset_print_state_for_reconnect()
+
+    assert queue._state == PrintState.IDLE
+    assert queue._last_filename is None
+
+
+def test_reconnect_still_resets_active_print(monkeypatch):
+    """Active-print state self-heals from telemetry, so it is reset as before."""
+    global ha_updates, history_calls, timelapse_calls, events
+    ha_updates, history_calls, timelapse_calls, events = [], [], [], []
+    queue = _queue()
+    now = [1000.0]
+    monkeypatch.setattr("web.service.mqtt.time.monotonic", lambda: now[0])
+
+    queue.mark_pending_print_start("part.gcode")
+    queue._handle_notification({"commandType": 1000, "value": 1})
+    assert queue._state == PrintState.PRINTING
+    queue._reset_print_state_for_reconnect()
+    assert queue._state == PrintState.IDLE
