@@ -85,6 +85,16 @@ STORED_FILE_START_CONFIRM_TIMEOUT_SEC = 12.0
 STORED_FILE_ONBOARD_START_CONFIRM_TIMEOUT_SEC = 20.0
 STORED_FILE_LIST_PAGE_SIZE = 47
 RECENT_COMPLETION_GUARD_SEC = 120.0
+# A pending (PREPARING) or pre-print (PRE_PRINT) start can't be re-derived from
+# printer telemetry, so it survives an MQTT reconnect for this long after it
+# was marked. Older ones are dropped as stale.
+PENDING_START_RECONNECT_KEEP_SEC = 900.0
+# The M5's pre-print phase (heating, homing, auto-levelling) reports ct=1001
+# progress 0 -> 100 for the same task before the real print starts at 0 again.
+# A progress-100 report is therefore only treated as a finish once it has held
+# this long without progress dropping back below 100 (ct=1000 value=0 still
+# completes immediately).
+PROGRESS_COMPLETE_GRACE_SEC = 300.0
 STORED_FILE_SOURCE_ROOTS = (
     "/tmp/udisk/",
     "/usr/data/local/model/",
@@ -236,7 +246,7 @@ class MqttQueue(Service):
         # next live telemetry, but filament vendor/type has no telemetry source
         # to re-derive from (it's a one-shot value pushed from the GCode header
         # at upload time), so it must not be wiped here or it is lost for good.
-        self._reset_print_state(preserve_filament_metadata=True)
+        self._reset_print_state_for_reconnect()
         self._ha.start()
         self._ha.update_state(mqtt_connected=True)
         self._last_query = 0
@@ -244,6 +254,14 @@ class MqttQueue(Service):
         self._timelapse_start_prompt_window_until = (
             time.monotonic() + TIMELAPSE_START_PROMPT_BOOT_WINDOW_SEC
         )
+
+    def _reset_print_state_for_reconnect(self):
+        """Reset per-connection print state, keeping a recent pending/pre-print
+        start that telemetry can't re-derive (see PENDING_START_RECONNECT_KEEP_SEC)."""
+        pending_start = self._snapshot_pending_start()
+        self._reset_print_state(preserve_filament_metadata=True)
+        if pending_start:
+            self._restore_pending_start(pending_start)
 
     def _reset_print_state(self, preserve_filament_metadata=False):
         self._state = PrintState.IDLE
@@ -266,6 +284,8 @@ class MqttQueue(Service):
         self._last_print_schedule_filename = None
         self._last_print_schedule_seen_at = 0.0
         self._pending_prepare_state_logged = False
+        self._pending_start_marked_at = None
+        self._pending_progress_completion = None
         if not preserve_filament_metadata:
             self._filament_vendor = None
             self._filament_type = None
@@ -571,6 +591,65 @@ class MqttQueue(Service):
             return True
         return False
 
+    _PENDING_START_FIELDS = (
+        "_state",
+        "_last_filename",
+        "_last_task_id",
+        "_pending_archive_info",
+        "_pending_stored_file_path",
+        "_preview_url",
+        "_preview_file_path",
+        "_pending_start_marked_at",
+        "_stop_requested",
+    )
+
+    # An active print in its progress-100 hold (see PROGRESS_COMPLETE_GRACE_SEC)
+    # can't be re-derived either: once reset to IDLE, further progress-100
+    # reports can't reactivate it, so the finish would never be recorded.
+    _PENDING_FINISH_FIELDS = (
+        "_state",
+        "_last_filename",
+        "_last_task_id",
+        "_preview_url",
+        "_preview_file_path",
+        "_print_started_at",
+        "_last_progress",
+        "_failure_sent",
+        "_pause_reason",
+        "_stop_requested",
+        "_pending_progress_completion",
+    )
+
+    def _snapshot_pending_start(self):
+        """Capture a pending/pre-print start so a reconnect doesn't lose it.
+
+        Returns None when there is nothing to keep, or it is older than
+        PENDING_START_RECONNECT_KEEP_SEC.
+        """
+        with self._state_lock:
+            state = getattr(self, "_state", None)
+            if (
+                state in (PrintState.PRINTING, PrintState.PAUSED)
+                and getattr(self, "_pending_progress_completion", None) is not None
+            ):
+                return {name: getattr(self, name, None) for name in self._PENDING_FINISH_FIELDS}
+            if state not in (PrintState.PREPARING, PrintState.PRE_PRINT):
+                return None
+            marked_at = getattr(self, "_pending_start_marked_at", None)
+            if not marked_at or time.monotonic() - marked_at > PENDING_START_RECONNECT_KEEP_SEC:
+                return None
+            return {name: getattr(self, name, None) for name in self._PENDING_START_FIELDS}
+
+    def _restore_pending_start(self, snapshot):
+        with self._state_lock:
+            for name, value in snapshot.items():
+                setattr(self, name, value)
+        log.info(
+            "Kept %s state for %r across MQTT reconnect",
+            snapshot["_state"].value,
+            snapshot.get("_last_filename"),
+        )
+
     def mark_pending_print_start(self, filename=None, task_id=None, archive_info=None):
         with self._state_lock:
             if filename:
@@ -586,6 +665,7 @@ class MqttQueue(Service):
                 }
             self._clear_recent_completion()
             self._state = PrintState.PREPARING
+            self._pending_start_marked_at = time.monotonic()
             self._pending_prepare_state_logged = False
             self._stop_requested = False
         log.info("Marked pending print start for %r", self._last_filename)
@@ -899,6 +979,7 @@ class MqttQueue(Service):
         )
 
     def worker_run(self, timeout):
+        self._check_pending_progress_completion()
         now = time.time()
 
         connection_age = now - getattr(self, "_connection_started_at", now)
@@ -1385,6 +1466,8 @@ class MqttQueue(Service):
             if self._is_preprint_preview_path(file_path) and (self._state == PrintState.PREPARING or self.is_preparing_print):
                 self._state = PrintState.PRE_PRINT
                 self._stop_requested = False
+                if not getattr(self, "_pending_start_marked_at", None):
+                    self._pending_start_marked_at = time.monotonic()
                 log.info("Early print activation via ct 1044")
             return
 
@@ -1607,23 +1690,67 @@ class MqttQueue(Service):
                 return
 
         if self._state == PrintState.PRINTING and progress >= 100:
-            self._record_print_complete_alert()
-            self._send_event(
-                EVENT_PRINT_FINISHED,
-                self._build_payload(payload, 100),
-                include_image=True,
+            # Don't finish yet: this may be the end of the pre-print phase.
+            # worker_run() finalises it after PROGRESS_COMPLETE_GRACE_SEC unless
+            # progress drops back below 100 or ct=1000 value=0 arrives first.
+            if getattr(self, "_pending_progress_completion", None) is None:
+                self._pending_progress_completion = (time.monotonic(), payload)
+                log.info(
+                    "Progress reached 100%% for %r; waiting %.0f s to confirm it is not the end of pre-print",
+                    self._last_filename,
+                    PROGRESS_COMPLETE_GRACE_SEC,
+                )
+        elif (
+            self._state in (PrintState.PRINTING, PrintState.PAUSED)
+            and progress < 100
+            and getattr(self, "_pending_progress_completion", None) is not None
+        ):
+            log.info(
+                "Progress dropped back to %d%% after 100%% for %r: that was the pre-print phase, print continues",
+                progress,
+                self._last_filename,
             )
-            self._remember_recent_completion()
-            self._history.record_finish(filename=self._last_filename, task_id=self._last_task_id)
-            if self._timelapse:
-                self._timelapse.finish_capture(final=True)
-            self._ha.update_state(print_status="complete", print_progress=100)
-            self._reset_print_state()
-            return
+            self._pending_progress_completion = None
+            self._last_progress_bucket = None
 
 
         self._emit_progress(payload, progress)
         self._last_progress = progress
+
+    def _finish_from_progress(self, payload):
+        """Record a finish that was signalled only by progress reaching 100."""
+        self._record_print_complete_alert()
+        self._send_event(
+            EVENT_PRINT_FINISHED,
+            self._build_payload(payload, 100),
+            include_image=True,
+        )
+        self._remember_recent_completion()
+        self._history.record_finish(filename=self._last_filename, task_id=self._last_task_id)
+        if self._timelapse:
+            self._timelapse.finish_capture(final=True)
+        self._ha.update_state(print_status="complete", print_progress=100)
+        self._reset_print_state()
+
+    def _check_pending_progress_completion(self, now=None):
+        pending = getattr(self, "_pending_progress_completion", None)
+        if pending is None:
+            return
+        now = time.monotonic() if now is None else now
+        started_at, payload = pending
+        if now - started_at < PROGRESS_COMPLETE_GRACE_SEC:
+            return
+        with self._state_lock:
+            if self._pending_progress_completion is not pending:
+                return
+            if self._state == PrintState.PAUSED:
+                # Keep holding while paused; decide once the print resumes.
+                return
+            self._pending_progress_completion = None
+            if self._state != PrintState.PRINTING:
+                return
+            log.info("Progress held at 100%% for %.0f s: print finished", now - started_at)
+            self._finish_from_progress(payload)
 
     def _emit_progress(self, payload, progress):
         if self._state != PrintState.PRINTING:
