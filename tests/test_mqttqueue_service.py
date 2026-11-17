@@ -2131,6 +2131,82 @@ def test_worker_stop_without_timelapse_service():
     queue.worker_stop()
 
 
+def _start_progress_print(queue, now, task="task-pre"):
+    queue._handle_notification({"commandType": 1001, "progress": 500, "name": "part.gcode", "task_id": task})
+    assert queue._state == PrintState.PRINTING
+    for pct in (5000, 9500, 10000):
+        now[0] += 30.0
+        queue._handle_notification({"commandType": 1001, "progress": pct, "name": "part.gcode", "task_id": task})
+
+
+def _finish_calls():
+    return [c for c in history_calls if c[0] == "finish"]
+
+
+def test_pre_print_progress_100_then_restart_is_not_a_finish(monkeypatch):
+    """The M5 pre-print phase runs 0->100 then the real print restarts at ~0."""
+    global ha_updates, history_calls, timelapse_calls, events
+    ha_updates, history_calls, timelapse_calls, events = [], [], [], []
+    queue = _queue()
+    now = [100.0]
+    monkeypatch.setattr("web.service.mqtt.time.monotonic", lambda: now[0])
+
+    _start_progress_print(queue, now)
+    assert queue._state == PrintState.PRINTING
+    assert _finish_calls() == []
+
+    now[0] += 60.0
+    queue._handle_notification({"commandType": 1001, "progress": 0, "name": "part.gcode", "task_id": "task-pre"})
+    now[0] += 60.0
+    queue._handle_notification({"commandType": 1001, "progress": 1000, "name": "part.gcode", "task_id": "task-pre"})
+
+    now[0] += 600.0
+    queue._check_pending_progress_completion()
+
+    assert queue._state == PrintState.PRINTING
+    assert queue._pending_progress_completion is None
+    assert _finish_calls() == []
+    assert not any(u.get("print_status") == "complete" for u in ha_updates)
+
+
+def test_progress_100_held_for_grace_period_finishes(monkeypatch):
+    global ha_updates, history_calls, timelapse_calls, events
+    ha_updates, history_calls, timelapse_calls, events = [], [], [], []
+    queue = _queue()
+    now = [100.0]
+    monkeypatch.setattr("web.service.mqtt.time.monotonic", lambda: now[0])
+
+    _start_progress_print(queue, now)
+    now[0] += 60.0
+    queue._check_pending_progress_completion()
+    assert queue._state == PrintState.PRINTING
+
+    now[0] += 300.0
+    queue._check_pending_progress_completion()
+
+    assert queue._state == PrintState.IDLE
+    assert len(_finish_calls()) == 1
+    assert {"print_status": "complete", "print_progress": 100} in ha_updates
+
+
+def test_progress_100_then_ct1000_idle_finishes_once(monkeypatch):
+    global ha_updates, history_calls, timelapse_calls, events
+    ha_updates, history_calls, timelapse_calls, events = [], [], [], []
+    queue = _queue()
+    now = [100.0]
+    monkeypatch.setattr("web.service.mqtt.time.monotonic", lambda: now[0])
+
+    _start_progress_print(queue, now)
+    now[0] += 5.0
+    queue._handle_notification({"commandType": 1000, "value": 0})
+    assert queue._state == PrintState.IDLE
+    assert len(_finish_calls()) == 1
+
+    now[0] += 600.0
+    queue._check_pending_progress_completion()
+    assert len(_finish_calls()) == 1
+
+
 def test_reconnect_keeps_recent_pending_print_start(monkeypatch):
     """A reconnect between upload and print start must not lose the pending start."""
     global ha_updates, history_calls, timelapse_calls, events

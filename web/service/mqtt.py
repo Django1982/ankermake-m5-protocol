@@ -89,6 +89,12 @@ RECENT_COMPLETION_GUARD_SEC = 120.0
 # printer telemetry, so it survives an MQTT reconnect for this long after it
 # was marked. Older ones are dropped as stale.
 PENDING_START_RECONNECT_KEEP_SEC = 900.0
+# The M5's pre-print phase (heating, homing, auto-levelling) reports ct=1001
+# progress 0 -> 100 for the same task before the real print starts at 0 again.
+# A progress-100 report is therefore only treated as a finish once it has held
+# this long without progress dropping back below 100 (ct=1000 value=0 still
+# completes immediately).
+PROGRESS_COMPLETE_GRACE_SEC = 300.0
 STORED_FILE_SOURCE_ROOTS = (
     "/tmp/udisk/",
     "/usr/data/local/model/",
@@ -279,6 +285,7 @@ class MqttQueue(Service):
         self._last_print_schedule_seen_at = 0.0
         self._pending_prepare_state_logged = False
         self._pending_start_marked_at = None
+        self._pending_progress_completion = None
         if not preserve_filament_metadata:
             self._filament_vendor = None
             self._filament_type = None
@@ -948,6 +955,7 @@ class MqttQueue(Service):
         )
 
     def worker_run(self, timeout):
+        self._check_pending_progress_completion()
         now = time.time()
 
         connection_age = now - getattr(self, "_connection_started_at", now)
@@ -1658,23 +1666,64 @@ class MqttQueue(Service):
                 return
 
         if self._state == PrintState.PRINTING and progress >= 100:
-            self._record_print_complete_alert()
-            self._send_event(
-                EVENT_PRINT_FINISHED,
-                self._build_payload(payload, 100),
-                include_image=True,
+            # Don't finish yet: this may be the end of the pre-print phase.
+            # worker_run() finalises it after PROGRESS_COMPLETE_GRACE_SEC unless
+            # progress drops back below 100 or ct=1000 value=0 arrives first.
+            if getattr(self, "_pending_progress_completion", None) is None:
+                self._pending_progress_completion = (time.monotonic(), payload)
+                log.info(
+                    "Progress reached 100%% for %r; waiting %.0f s to confirm it is not the end of pre-print",
+                    self._last_filename,
+                    PROGRESS_COMPLETE_GRACE_SEC,
+                )
+        elif (
+            self._state == PrintState.PRINTING
+            and progress < 100
+            and getattr(self, "_pending_progress_completion", None) is not None
+        ):
+            log.info(
+                "Progress dropped back to %d%% after 100%% for %r: that was the pre-print phase, print continues",
+                progress,
+                self._last_filename,
             )
-            self._remember_recent_completion()
-            self._history.record_finish(filename=self._last_filename, task_id=self._last_task_id)
-            if self._timelapse:
-                self._timelapse.finish_capture(final=True)
-            self._ha.update_state(print_status="complete", print_progress=100)
-            self._reset_print_state()
-            return
+            self._pending_progress_completion = None
+            self._last_progress_bucket = None
 
 
         self._emit_progress(payload, progress)
         self._last_progress = progress
+
+    def _finish_from_progress(self, payload):
+        """Record a finish that was signalled only by progress reaching 100."""
+        self._record_print_complete_alert()
+        self._send_event(
+            EVENT_PRINT_FINISHED,
+            self._build_payload(payload, 100),
+            include_image=True,
+        )
+        self._remember_recent_completion()
+        self._history.record_finish(filename=self._last_filename, task_id=self._last_task_id)
+        if self._timelapse:
+            self._timelapse.finish_capture(final=True)
+        self._ha.update_state(print_status="complete", print_progress=100)
+        self._reset_print_state()
+
+    def _check_pending_progress_completion(self, now=None):
+        pending = getattr(self, "_pending_progress_completion", None)
+        if pending is None:
+            return
+        now = time.monotonic() if now is None else now
+        started_at, payload = pending
+        if now - started_at < PROGRESS_COMPLETE_GRACE_SEC:
+            return
+        with self._state_lock:
+            if self._pending_progress_completion is not pending:
+                return
+            self._pending_progress_completion = None
+            if self._state != PrintState.PRINTING:
+                return
+            log.info("Progress held at 100%% for %.0f s: print finished", now - started_at)
+            self._finish_from_progress(payload)
 
     def _emit_progress(self, payload, progress):
         if self._state != PrintState.PRINTING:
