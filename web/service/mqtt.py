@@ -916,6 +916,9 @@ class MqttQueue(Service):
                 "— reconnecting in %.0f s",
                 silence, connection_age, count, holdoff,
             )
+            # Only the printer link is quiet; the HA broker connection is fine.
+            # Tell worker_stop() to keep the HA bridge up across this restart.
+            self._watchdog_restart = True
             raise ServiceRestartSignal("MQTT connection stuck: no messages received", delay=holdoff)
 
         # Poll status every 10 seconds if idle
@@ -950,7 +953,16 @@ class MqttQueue(Service):
         if getattr(self, "_timelapse", None):
             self._timelapse.handle_mqtt_service_stopped()
         self._ha.update_state(mqtt_connected=False)
-        self._ha.stop()
+        # A silent-printer watchdog restart is a printer-link event, not a
+        # shutdown: keep the HA bridge connected and its availability "online"
+        # so HA entities don't flap to "unavailable" every holdoff cycle and
+        # then reappear with stale retained state. worker_start() re-uses the
+        # existing HA client (HomeAssistantService.start() is a no-op when
+        # already connected). A real stop (wanted=False) still tears it down.
+        keep_ha = getattr(self, "_watchdog_restart", False) and getattr(self, "wanted", False)
+        self._watchdog_restart = False
+        if not keep_ha:
+            self._ha.stop()
         if hasattr(self, "client"):
             del self.client
 
