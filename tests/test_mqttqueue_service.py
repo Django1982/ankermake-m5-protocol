@@ -2129,3 +2129,95 @@ def test_worker_stop_without_timelapse_service():
     queue._ha = SimpleNamespace(update_state=lambda **kwargs: None, stop=lambda: None)
 
     queue.worker_stop()
+
+
+def _stuck_queue():
+    queue = _queue()
+    queue._connection_started_at = time.time() - 100.0
+    queue._last_message_time = time.time() - 100.0
+    queue._silent_reconnect_count = 0
+
+    class _FakeClient:
+        def fetch(self, timeout): return []
+        def query(self, cmd): pass
+
+    queue.client = _FakeClient()
+    queue._last_query = time.time()
+    queue._timelapse = None
+    return queue
+
+
+def test_watchdog_restart_keeps_ha_bridge_online():
+    """A silent-printer watchdog restart must not take the HA bridge offline."""
+    import pytest
+    from web.lib.service import ServiceRestartSignal
+
+    queue = _stuck_queue()
+    queue.wanted = True
+    updates, stops = [], []
+    queue._ha = SimpleNamespace(update_state=lambda **kw: updates.append(kw), stop=lambda: stops.append(True))
+
+    with pytest.raises(ServiceRestartSignal):
+        queue.worker_run(timeout=0.1)
+    queue.worker_stop()
+
+    assert stops == [], "HA bridge must stay connected across a watchdog restart"
+    assert {"mqtt_connected": False} in updates
+    assert queue._watchdog_restart is False
+
+
+def test_watchdog_restart_then_service_stop_tears_down_ha():
+    """If the service is being stopped (wanted=False), the HA bridge still stops."""
+    import pytest
+    from web.lib.service import ServiceRestartSignal
+
+    queue = _stuck_queue()
+    queue.wanted = False
+    stops = []
+    queue._ha = SimpleNamespace(update_state=lambda **kw: None, stop=lambda: stops.append(True))
+
+    with pytest.raises(ServiceRestartSignal):
+        queue.worker_run(timeout=0.1)
+    queue.worker_stop()
+
+    assert stops == [True]
+
+
+def test_regular_worker_stop_tears_down_ha():
+    queue = _stuck_queue()
+    queue.wanted = True
+    stops = []
+    queue._ha = SimpleNamespace(update_state=lambda **kw: None, stop=lambda: stops.append(True))
+
+    queue.worker_stop()
+
+    assert stops == [True]
+
+
+def test_failed_reconnect_after_watchdog_restart_stops_kept_ha_bridge(monkeypatch):
+    """If the reconnect after a watchdog restart fails, the kept HA bridge is torn
+    down, because stop() during the retry holdoff never reaches worker_stop()."""
+    import pytest
+    from web.lib.service import ServiceRestartSignal
+
+    queue = _stuck_queue()
+    queue.wanted = True
+    stops = []
+    queue._ha = SimpleNamespace(update_state=lambda **kw: None, stop=lambda: stops.append(True), start=lambda: None)
+
+    with pytest.raises(ServiceRestartSignal):
+        queue.worker_run(timeout=0.1)
+    queue.worker_stop()
+    assert stops == []  # bridge kept across the watchdog restart
+
+    def _fail(*args, **kwargs):
+        raise ConnectionError("broker unreachable")
+
+    monkeypatch.setattr("web.service.mqtt.cli.mqtt.mqtt_open", _fail)
+    monkeypatch.setitem(__import__("web").app.config, "config", object())
+    monkeypatch.setitem(__import__("web").app.config, "insecure", False)
+    monkeypatch.setitem(__import__("web").app.config, "mqtt_ca_cert", "ca.pem")
+    with pytest.raises(ConnectionError):
+        queue.worker_start()
+
+    assert stops == [True]
