@@ -225,12 +225,20 @@ class MqttQueue(Service):
 
     def worker_start(self):
         mqtt_ca_cert = app.config.get("mqtt_ca_cert") or cli.model.default_mqtt_ca_cert()
-        self.client = cli.mqtt.mqtt_open(
-            app.config["config"],
-            self.printer_index,
-            app.config["insecure"],
-            mqtt_ca_cert,
-        )
+        try:
+            self.client = cli.mqtt.mqtt_open(
+                app.config["config"],
+                self.printer_index,
+                app.config["insecure"],
+                mqtt_ca_cert,
+            )
+        except Exception:
+            # A watchdog restart may have kept the HA bridge connected. If the
+            # reconnect fails, Service.run() can go Starting -> Stopped on a
+            # stop() during the retry holdoff without calling worker_stop(),
+            # so tear the bridge down here (a no-op if it isn't running).
+            self._ha.stop()
+            raise
         # A reconnect is a connection-layer event, not the end of a print: the
         # printer's own state (task_id, filename, progress) self-heals from the
         # next live telemetry, but filament vendor/type has no telemetry source

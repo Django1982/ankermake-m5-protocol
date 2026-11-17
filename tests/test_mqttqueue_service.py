@@ -2192,3 +2192,32 @@ def test_regular_worker_stop_tears_down_ha():
     queue.worker_stop()
 
     assert stops == [True]
+
+
+def test_failed_reconnect_after_watchdog_restart_stops_kept_ha_bridge(monkeypatch):
+    """If the reconnect after a watchdog restart fails, the kept HA bridge is torn
+    down, because stop() during the retry holdoff never reaches worker_stop()."""
+    import pytest
+    from web.lib.service import ServiceRestartSignal
+
+    queue = _stuck_queue()
+    queue.wanted = True
+    stops = []
+    queue._ha = SimpleNamespace(update_state=lambda **kw: None, stop=lambda: stops.append(True), start=lambda: None)
+
+    with pytest.raises(ServiceRestartSignal):
+        queue.worker_run(timeout=0.1)
+    queue.worker_stop()
+    assert stops == []  # bridge kept across the watchdog restart
+
+    def _fail(*args, **kwargs):
+        raise ConnectionError("broker unreachable")
+
+    monkeypatch.setattr("web.service.mqtt.cli.mqtt.mqtt_open", _fail)
+    monkeypatch.setitem(__import__("web").app.config, "config", object())
+    monkeypatch.setitem(__import__("web").app.config, "insecure", False)
+    monkeypatch.setitem(__import__("web").app.config, "mqtt_ca_cert", "ca.pem")
+    with pytest.raises(ConnectionError):
+        queue.worker_start()
+
+    assert stops == [True]
