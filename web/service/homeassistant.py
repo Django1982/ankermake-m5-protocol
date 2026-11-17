@@ -45,6 +45,12 @@ class HomeAssistantService:
         self._client = None
         self._connected = False
         self._lock = threading.Lock()
+        # Serialises snapshot+publish of the state topic between update_state()
+        # (worker threads, under _lock) and the replay in _on_connect() (paho's
+        # network thread). It's separate from _lock because stop() holds _lock
+        # while loop_stop() joins the paho thread, so _on_connect() must never
+        # wait for _lock. Lock order: _lock -> _state_publish_lock.
+        self._state_publish_lock = threading.Lock()
         self._availability_thread = None
         self._stop_event = threading.Event()
         self._availability_generation = 0
@@ -372,9 +378,14 @@ class HomeAssistantService:
             self._stop_event.wait(_AVAILABILITY_TIMEOUT)
 
     def _publish_state(self):
-        """Publish the full state JSON to the state topic."""
-        payload = json.dumps(self._state)
-        self._publish(self._state_topic(), payload, retain=True)
+        """Publish the full state JSON to the state topic.
+
+        The snapshot is taken under _state_publish_lock, so whichever publish
+        runs last also carries the newest cached state.
+        """
+        with self._state_publish_lock:
+            payload = json.dumps(self._state)
+            self._publish(self._state_topic(), payload, retain=True)
 
     # ------------------------------------------------------------------
     # MQTT Discovery

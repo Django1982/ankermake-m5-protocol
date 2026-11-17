@@ -417,3 +417,36 @@ def test_update_state_disabled_does_nothing():
     svc = HomeAssistantService(FakeConfigManager(_service_config(enabled=False)), printer_sn="SN123", printer_name="Printer")
     svc.update_state(mqtt_connected=True)
     assert svc._state["mqtt_connected"] is False
+
+
+def test_connect_replay_cannot_overwrite_newer_state(monkeypatch):
+    """The on-connect replay (paho thread) and a concurrent update_state() must not
+    leave an older snapshot as the last retained state."""
+    import threading
+    import time as _time
+    import web.service.homeassistant as ha_module
+
+    svc = HomeAssistantService(FakeConfigManager(_service_config()), printer_sn="SN123", printer_name="Printer")
+    client = FakeMQTTClient()
+    svc._client = client
+    svc._connected = True
+    svc._state["mqtt_connected"] = False
+
+    real_dumps = ha_module.json.dumps
+    worker = {}
+
+    def slow_first_dumps(obj, *args, **kwargs):
+        out = real_dumps(obj, *args, **kwargs)
+        if "t" not in worker:
+            # Replay has snapshotted the old state; a worker updates meanwhile.
+            worker["t"] = threading.Thread(target=lambda: svc.update_state(mqtt_connected=True))
+            worker["t"].start()
+            _time.sleep(0.2)
+        return out
+
+    monkeypatch.setattr(ha_module.json, "dumps", slow_first_dumps)
+    svc._publish_state()          # the replay
+    worker["t"].join(timeout=5)
+
+    states = [json.loads(p) for t, p, q, r in client.published if t == "ankerctl/SN123/state"]
+    assert states[-1]["mqtt_connected"] is True

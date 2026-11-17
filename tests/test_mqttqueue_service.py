@@ -2156,3 +2156,23 @@ def test_pppp_connected_lookup_failure_reports_false(monkeypatch):
     monkeypatch.setattr(web_module.app, "svc", SimpleNamespace(svcs={}), raising=False)
     monkeypatch.setattr(web_module, "resolve_pppp_service_name", lambda idx=None: "missing")
     assert queue._pppp_connected() is False
+
+
+def test_pppp_connected_includes_file_transfer_session(monkeypatch):
+    """An upload stops the shared PPPP service and uses its own session; that counts."""
+    import web as web_module
+    from libflagship.ppppapi import PPPPState
+    from web.service import pppp as pppp_module
+
+    queue = _queue()
+    monkeypatch.setattr(web_module.app, "svc", SimpleNamespace(svcs={"pppp": SimpleNamespace(connected=False)}), raising=False)
+    monkeypatch.setattr(web_module, "resolve_pppp_service_name", lambda idx=None: "pppp")
+
+    assert queue._pppp_connected() is False
+    api = SimpleNamespace(state=PPPPState.Connected)
+    pppp_module.set_transfer_api("pppp", api)
+    try:
+        assert queue._pppp_connected() is True
+    finally:
+        pppp_module.set_transfer_api("pppp", None)
+    assert queue._pppp_connected() is False

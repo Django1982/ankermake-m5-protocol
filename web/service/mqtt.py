@@ -909,9 +909,13 @@ class MqttQueue(Service):
         try:
             from .. import resolve_pppp_service_name
 
+            from .pppp import transfer_connected
+
+            service_name = resolve_pppp_service_name(self.printer_index)
             svcs = getattr(app.svc, "svcs", None) or {}
-            svc = svcs.get(resolve_pppp_service_name(self.printer_index))
-            return bool(getattr(svc, "connected", False))
+            svc = svcs.get(service_name)
+            # A file upload stops the shared service and uses its own session.
+            return bool(getattr(svc, "connected", False)) or transfer_connected(service_name)
         except Exception:
             return False
 
