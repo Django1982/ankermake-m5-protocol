@@ -600,6 +600,24 @@ class MqttQueue(Service):
         "_preview_url",
         "_preview_file_path",
         "_pending_start_marked_at",
+        "_stop_requested",
+    )
+
+    # An active print in its progress-100 hold (see PROGRESS_COMPLETE_GRACE_SEC)
+    # can't be re-derived either: once reset to IDLE, further progress-100
+    # reports can't reactivate it, so the finish would never be recorded.
+    _PENDING_FINISH_FIELDS = (
+        "_state",
+        "_last_filename",
+        "_last_task_id",
+        "_preview_url",
+        "_preview_file_path",
+        "_print_started_at",
+        "_last_progress",
+        "_failure_sent",
+        "_pause_reason",
+        "_stop_requested",
+        "_pending_progress_completion",
     )
 
     def _snapshot_pending_start(self):
@@ -609,7 +627,13 @@ class MqttQueue(Service):
         PENDING_START_RECONNECT_KEEP_SEC.
         """
         with self._state_lock:
-            if getattr(self, "_state", None) not in (PrintState.PREPARING, PrintState.PRE_PRINT):
+            state = getattr(self, "_state", None)
+            if (
+                state in (PrintState.PRINTING, PrintState.PAUSED)
+                and getattr(self, "_pending_progress_completion", None) is not None
+            ):
+                return {name: getattr(self, name, None) for name in self._PENDING_FINISH_FIELDS}
+            if state not in (PrintState.PREPARING, PrintState.PRE_PRINT):
                 return None
             marked_at = getattr(self, "_pending_start_marked_at", None)
             if not marked_at or time.monotonic() - marked_at > PENDING_START_RECONNECT_KEEP_SEC:
@@ -621,7 +645,7 @@ class MqttQueue(Service):
             for name, value in snapshot.items():
                 setattr(self, name, value)
         log.info(
-            "Kept %s start for %r across MQTT reconnect",
+            "Kept %s state for %r across MQTT reconnect",
             snapshot["_state"].value,
             snapshot.get("_last_filename"),
         )
@@ -1677,7 +1701,7 @@ class MqttQueue(Service):
                     PROGRESS_COMPLETE_GRACE_SEC,
                 )
         elif (
-            self._state == PrintState.PRINTING
+            self._state in (PrintState.PRINTING, PrintState.PAUSED)
             and progress < 100
             and getattr(self, "_pending_progress_completion", None) is not None
         ):
@@ -1718,6 +1742,9 @@ class MqttQueue(Service):
             return
         with self._state_lock:
             if self._pending_progress_completion is not pending:
+                return
+            if self._state == PrintState.PAUSED:
+                # Keep holding while paused; decide once the print resumes.
                 return
             self._pending_progress_completion = None
             if self._state != PrintState.PRINTING:

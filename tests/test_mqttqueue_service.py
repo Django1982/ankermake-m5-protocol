@@ -2275,3 +2275,100 @@ def test_reconnect_still_resets_active_print(monkeypatch):
     assert queue._state == PrintState.PRINTING
     queue._reset_print_state_for_reconnect()
     assert queue._state == PrintState.IDLE
+
+
+def test_reconnect_during_completion_hold_keeps_hold_and_finishes_once(monkeypatch):
+    global ha_updates, history_calls, timelapse_calls, events
+    ha_updates, history_calls, timelapse_calls, events = [], [], [], []
+    queue = _queue()
+    now = [100.0]
+    monkeypatch.setattr("web.service.mqtt.time.monotonic", lambda: now[0])
+
+    _start_progress_print(queue, now)
+    assert queue._pending_progress_completion is not None
+    now[0] += 90.0
+    queue._reset_print_state_for_reconnect()
+
+    assert queue._state == PrintState.PRINTING
+    assert queue._last_filename == "part.gcode"
+    assert queue._pending_progress_completion is not None
+
+    now[0] += 300.0
+    queue._check_pending_progress_completion()
+    assert queue._state == PrintState.IDLE
+    assert len(_finish_calls()) == 1
+
+
+def test_reconnect_during_completion_hold_then_lower_progress_cancels_hold(monkeypatch):
+    global ha_updates, history_calls, timelapse_calls, events
+    ha_updates, history_calls, timelapse_calls, events = [], [], [], []
+    queue = _queue()
+    now = [100.0]
+    monkeypatch.setattr("web.service.mqtt.time.monotonic", lambda: now[0])
+
+    _start_progress_print(queue, now)
+    queue._reset_print_state_for_reconnect()
+    now[0] += 30.0
+    queue._handle_notification({"commandType": 1001, "progress": 1000, "name": "part.gcode", "task_id": "task-pre"})
+    assert queue._pending_progress_completion is None
+    now[0] += 600.0
+    queue._check_pending_progress_completion()
+    assert queue._state == PrintState.PRINTING
+    assert _finish_calls() == []
+
+
+def test_reconnect_keeps_stop_requested_with_pending_start(monkeypatch):
+    """A Stop issued during pre-print must still be recorded as a cancellation after a reconnect."""
+    global ha_updates, history_calls, timelapse_calls, events
+    ha_updates, history_calls, timelapse_calls, events = [], [], [], []
+    queue = _queue()
+    now = [1000.0]
+    monkeypatch.setattr("web.service.mqtt.time.monotonic", lambda: now[0])
+
+    queue.mark_pending_print_start("part.gcode")
+    queue._state = PrintState.PRE_PRINT
+    queue._stop_requested = True
+    now[0] += 30.0
+    queue._reset_print_state_for_reconnect()
+    assert queue._stop_requested is True
+
+    queue._handle_notification({"commandType": 1000, "value": 0})
+
+    assert _finish_calls() == []
+    assert not any(e[0] == EVENT_PRINT_FINISHED for e in events)
+
+
+def test_lower_progress_while_paused_cancels_hold(monkeypatch):
+    global ha_updates, history_calls, timelapse_calls, events
+    ha_updates, history_calls, timelapse_calls, events = [], [], [], []
+    queue = _queue()
+    now = [100.0]
+    monkeypatch.setattr("web.service.mqtt.time.monotonic", lambda: now[0])
+
+    _start_progress_print(queue, now)
+    queue._handle_notification({"commandType": 1000, "value": 2})
+    assert queue._state == PrintState.PAUSED
+    now[0] += 10.0
+    queue._handle_notification({"commandType": 1001, "progress": 500, "name": "part.gcode", "task_id": "task-pre"})
+    assert queue._pending_progress_completion is None
+
+    queue._handle_notification({"commandType": 1000, "value": 3})
+    now[0] += 600.0
+    queue._check_pending_progress_completion()
+    assert _finish_calls() == []
+
+
+def test_completion_hold_waits_while_paused(monkeypatch):
+    global ha_updates, history_calls, timelapse_calls, events
+    ha_updates, history_calls, timelapse_calls, events = [], [], [], []
+    queue = _queue()
+    now = [100.0]
+    monkeypatch.setattr("web.service.mqtt.time.monotonic", lambda: now[0])
+
+    _start_progress_print(queue, now)
+    queue._handle_notification({"commandType": 1000, "value": 2})
+    now[0] += 600.0
+    queue._check_pending_progress_completion()
+    assert queue._state == PrintState.PAUSED
+    assert queue._pending_progress_completion is not None
+    assert _finish_calls() == []
