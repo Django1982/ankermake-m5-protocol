@@ -2129,3 +2129,50 @@ def test_worker_stop_without_timelapse_service():
     queue._ha = SimpleNamespace(update_state=lambda **kwargs: None, stop=lambda: None)
 
     queue.worker_stop()
+
+
+def test_pppp_connected_is_polled_into_ha(monkeypatch):
+    import web as web_module
+
+    updates = []
+    queue = _queue()
+    queue._ha = SimpleNamespace(update_state=lambda **kw: updates.append(kw))
+    pppp = SimpleNamespace(connected=True)
+    monkeypatch.setattr(web_module.app, "svc", SimpleNamespace(svcs={"pppp": pppp}), raising=False)
+    monkeypatch.setattr(web_module, "resolve_pppp_service_name", lambda idx=None: "pppp")
+
+    queue._poll_pppp_connected(100.0)
+    queue._poll_pppp_connected(101.0)   # within poll interval: skipped
+    pppp.connected = False
+    queue._poll_pppp_connected(106.0)
+
+    assert updates == [{"pppp_connected": True}, {"pppp_connected": False}]
+
+
+def test_pppp_connected_lookup_failure_reports_false(monkeypatch):
+    import web as web_module
+
+    queue = _queue()
+    monkeypatch.setattr(web_module.app, "svc", SimpleNamespace(svcs={}), raising=False)
+    monkeypatch.setattr(web_module, "resolve_pppp_service_name", lambda idx=None: "missing")
+    assert queue._pppp_connected() is False
+
+
+def test_pppp_connected_includes_file_transfer_session(monkeypatch):
+    """An upload stops the shared PPPP service and uses its own session; that counts."""
+    import web as web_module
+    from libflagship.ppppapi import PPPPState
+    from web.service import pppp as pppp_module
+
+    queue = _queue()
+    monkeypatch.setattr(web_module.app, "svc", SimpleNamespace(svcs={"pppp": SimpleNamespace(connected=False)}), raising=False)
+    monkeypatch.setattr(web_module, "resolve_pppp_service_name", lambda idx=None: "pppp")
+
+    assert queue._pppp_connected() is False
+    api = SimpleNamespace(state=PPPPState.Connected)
+    pppp_module.set_transfer_api("pppp", api)
+    try:
+        assert queue._pppp_connected() is True
+    finally:
+        pppp_module.set_transfer_api("pppp", None)
+    assert queue._pppp_connected() is False

@@ -11,7 +11,7 @@ from libflagship.ppppapi import FileUploadInfo, PPPPError
 import cli.util
 import cli.pppp
 from cli.util import patch_gcode_time, extract_filament_info, extract_layer_count
-from .pppp import reserve_session
+from .pppp import reserve_session, set_transfer_api
 
 log = logging.getLogger(__name__)
 
@@ -125,7 +125,7 @@ class FileTransferService(Service):
                 "start_print": start_print_flag,
             })
         effective_printer_index = printer_index if printer_index is not None else app.config.get("printer_index", 0)
-        with reserve_session(effective_printer_index):
+        with reserve_session(effective_printer_index) as session_name:
             try:
                 api = cli.pppp.pppp_open(
                     app.config["config"],
@@ -136,6 +136,7 @@ class FileTransferService(Service):
             except Exception as e:
                 self._notify_upload({"status": "error", "name": upload_name, "error": str(e), "start_print": start_print_flag})
                 raise ConnectionError(f"No pppp connection to printer: {e}") from e
+            set_transfer_api(session_name, api)
             try:
                 cli.pppp.pppp_send_file(
                     api,
@@ -184,6 +185,7 @@ class FileTransferService(Service):
                 })
                 self._notify_apprise_upload(upload_name, fui.size, start_print)
             finally:
+                set_transfer_api(session_name, None)
                 api.stop()
 
     def _notify_apprise_upload(self, filename, size_bytes, start_print):

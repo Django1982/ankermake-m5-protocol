@@ -45,6 +45,12 @@ class HomeAssistantService:
         self._client = None
         self._connected = False
         self._lock = threading.Lock()
+        # Serialises snapshot+publish of the state topic between update_state()
+        # (worker threads, under _lock) and the replay in _on_connect() (paho's
+        # network thread). It's separate from _lock because stop() holds _lock
+        # while loop_stop() joins the paho thread, so _on_connect() must never
+        # wait for _lock. Lock order: _lock -> _state_publish_lock.
+        self._state_publish_lock = threading.Lock()
         self._availability_thread = None
         self._stop_event = threading.Event()
         self._availability_generation = 0
@@ -253,6 +259,10 @@ class HomeAssistantService:
         # Mark device online
         self._publish(self._availability_topic(), "online", retain=True)
 
+        # Publish the cached state: updates made while disconnected were
+        # cached but not sent, and the retained state may be stale.
+        self._publish_state()
+
         # Subscribe to command topics (light switch)
         light_cmd_topic = f"{self._topic_prefix}/{self._printer_sn}/light/set"
         client.subscribe(light_cmd_topic, qos=1)
@@ -322,9 +332,13 @@ class HomeAssistantService:
             print_filename, time_elapsed, time_remaining,
             mqtt_connected, pppp_connected, light
         """
-        if not self._enabled or not self._connected:
+        if not self._enabled:
             return
 
+        # Always update the cache, even before the broker connection is up:
+        # _on_connect() publishes the cached state, so an update that arrives
+        # while (re)connecting (e.g. mqtt_connected=True straight after
+        # start()) is not lost.
         with self._lock:
             changed = False
             for key, value in kwargs.items():
@@ -332,7 +346,7 @@ class HomeAssistantService:
                     self._state[key] = value
                     changed = True
 
-            if changed:
+            if changed and self._connected:
                 self._publish_state()
 
     # ------------------------------------------------------------------
@@ -364,9 +378,14 @@ class HomeAssistantService:
             self._stop_event.wait(_AVAILABILITY_TIMEOUT)
 
     def _publish_state(self):
-        """Publish the full state JSON to the state topic."""
-        payload = json.dumps(self._state)
-        self._publish(self._state_topic(), payload, retain=True)
+        """Publish the full state JSON to the state topic.
+
+        The snapshot is taken under _state_publish_lock, so whichever publish
+        runs last also carries the newest cached state.
+        """
+        with self._state_publish_lock:
+            payload = json.dumps(self._state)
+            self._publish(self._state_topic(), payload, retain=True)
 
     # ------------------------------------------------------------------
     # MQTT Discovery

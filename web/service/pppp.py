@@ -57,6 +57,31 @@ def _get_session_lock(service_name):
         return lock
 
 
+# Dedicated file-transfer PPPP connections, keyed by PPPP service name.
+# reserve_session() stops the shared PPPPService during an upload, so its
+# `connected` doesn't reflect the transfer's own session.
+_transfer_apis = {}
+_transfer_apis_lock = threading.Lock()
+
+
+def set_transfer_api(service_name, api):
+    """Record (api) or clear (None) the file-transfer connection for a printer."""
+    if not service_name:
+        return
+    with _transfer_apis_lock:
+        if api is None:
+            _transfer_apis.pop(service_name, None)
+        else:
+            _transfer_apis[service_name] = api
+
+
+def transfer_connected(service_name) -> bool:
+    """Whether a file transfer currently holds a live PPPP session for the printer."""
+    with _transfer_apis_lock:
+        api = _transfer_apis.get(service_name)
+    return getattr(api, "state", None) == PPPPState.Connected
+
+
 @contextlib.contextmanager
 def reserve_session(printer_index=None):
     """Exclusively reserve a printer's PPPP session for a file transfer.
@@ -87,7 +112,7 @@ def reserve_session(printer_index=None):
                 # before the stop is confirmed makes the transfer connect
                 # against a still-occupied printer session slot.
                 svc.await_stopped(timeout=15.0)
-            yield
+            yield service_name
     finally:
         # Restart outside the lock: worker_start() probes this same lock, and
         # starting while still holding it makes the service thread lose the
