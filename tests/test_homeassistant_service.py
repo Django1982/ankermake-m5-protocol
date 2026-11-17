@@ -389,3 +389,31 @@ def test_rapid_reconnect_no_thread_leak():
     svc._stop_event.set()
     if svc._availability_thread:
         svc._availability_thread.join(timeout=2)
+
+
+def test_update_state_before_connect_is_cached_and_published_on_connect(monkeypatch):
+    """mqtt_connected=True sent right after start() (before on_connect) must not be lost."""
+    svc = HomeAssistantService(FakeConfigManager(_service_config()), printer_sn="SN123", printer_name="Printer")
+    client = FakeMQTTClient()
+    svc._client = client
+    svc._connected = False
+    monkeypatch.setattr(svc, "_register_ha_mjpeg_camera", lambda: None)
+    monkeypatch.setattr("web.service.homeassistant.threading.Thread",
+                        lambda *a, **k: SimpleNamespace(start=lambda: None, is_alive=lambda: False, join=lambda timeout=None: None))
+
+    svc.update_state(mqtt_connected=True, nozzle_temp=200)
+    assert client.published == []
+    assert svc._state["mqtt_connected"] is True
+
+    svc._on_connect(client, None, None, 0)
+
+    states = [json.loads(p) for t, p, q, r in client.published if t == "ankerctl/SN123/state"]
+    assert states, "cached state must be published on connect"
+    assert states[-1]["mqtt_connected"] is True
+    assert states[-1]["nozzle_temp"] == 200
+
+
+def test_update_state_disabled_does_nothing():
+    svc = HomeAssistantService(FakeConfigManager(_service_config(enabled=False)), printer_sn="SN123", printer_name="Printer")
+    svc.update_state(mqtt_connected=True)
+    assert svc._state["mqtt_connected"] is False

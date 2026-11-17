@@ -85,6 +85,8 @@ STORED_FILE_START_CONFIRM_TIMEOUT_SEC = 12.0
 STORED_FILE_ONBOARD_START_CONFIRM_TIMEOUT_SEC = 20.0
 STORED_FILE_LIST_PAGE_SIZE = 47
 RECENT_COMPLETION_GUARD_SEC = 120.0
+# How often the HA "PPPP connected" binary sensor is refreshed.
+PPPP_STATE_POLL_SEC = 5.0
 STORED_FILE_SOURCE_ROOTS = (
     "/tmp/udisk/",
     "/usr/data/local/model/",
@@ -898,8 +900,30 @@ class MqttQueue(Service):
             f"(last seen: {current_text} mm / {current_steps} steps)"
         )
 
+    def _pppp_connected(self):
+        """Whether this printer's PPPP service currently has a live session.
+
+        Looks the service up without borrowing it, so polling never starts
+        or holds a PPPP connection.
+        """
+        try:
+            from .. import resolve_pppp_service_name
+
+            svcs = getattr(app.svc, "svcs", None) or {}
+            svc = svcs.get(resolve_pppp_service_name(self.printer_index))
+            return bool(getattr(svc, "connected", False))
+        except Exception:
+            return False
+
+    def _poll_pppp_connected(self, now):
+        if now - getattr(self, "_last_pppp_poll", 0.0) < PPPP_STATE_POLL_SEC:
+            return
+        self._last_pppp_poll = now
+        self._ha.update_state(pppp_connected=self._pppp_connected())
+
     def worker_run(self, timeout):
         now = time.time()
+        self._poll_pppp_connected(now)
 
         connection_age = now - getattr(self, "_connection_started_at", now)
         last_activity = max(self._last_message_time, getattr(self, "_connection_started_at", 0))
