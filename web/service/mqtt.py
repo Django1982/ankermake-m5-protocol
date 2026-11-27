@@ -238,7 +238,9 @@ class MqttQueue(Service):
         # at upload time), so it must not be wiped here or it is lost for good.
         self._reset_print_state(preserve_filament_metadata=True)
         self._ha.start()
-        self._ha.update_state(mqtt_connected=True)
+        # Set True on the first message from the printer (worker_run), not on
+        # broker connect: the broker accepts us even when the printer is off.
+        self._printer_talking = False
         self._last_query = 0
         self._connection_started_at = time.time()
         self._timelapse_start_prompt_window_until = (
@@ -926,6 +928,9 @@ class MqttQueue(Service):
         for msg, body in self.client.fetch(timeout=timeout):
             self._last_message_time = time.time()
             self._silent_reconnect_count = 0
+            if not getattr(self, "_printer_talking", False):
+                self._printer_talking = True
+                self._ha.update_state(mqtt_connected=True)
             log.debug(f"TOPIC [{msg.topic}]")
             log.debug(enhex(msg.payload[:]))
             if body and getattr(self, "_debug_log_payloads", False):
@@ -949,6 +954,7 @@ class MqttQueue(Service):
     def worker_stop(self):
         if getattr(self, "_timelapse", None):
             self._timelapse.handle_mqtt_service_stopped()
+        self._printer_talking = False
         self._ha.update_state(mqtt_connected=False)
         self._ha.stop()
         if hasattr(self, "client"):

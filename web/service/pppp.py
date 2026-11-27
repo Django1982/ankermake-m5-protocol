@@ -375,6 +375,7 @@ class PPPPService(Service):
         self._api = api
         self._connected_event.set()
         self._connected_since = datetime.now()
+        self._set_ha_pppp_connected(True)
 
     def _drain_xzyh(self, chan):
         api = getattr(self, "_api", None)
@@ -539,6 +540,19 @@ class PPPPService(Service):
         if hasattr(self, "_connected_event"):
             self._connected_event.clear()
         self._force_close_api()
+        self._set_ha_pppp_connected(False)
+
+    def _set_ha_pppp_connected(self, value):
+        """Report the PPPP link state to the Home Assistant bridge (best effort)."""
+        try:
+            import web
+
+            mqtt = web.get_mqtt_service(getattr(self, "printer_index", None))
+            ha = getattr(mqtt, "_ha", None) if mqtt is not None else None
+            if ha is not None:
+                ha.update_state(pppp_connected=bool(value))
+        except Exception as err:
+            log.debug(f"PPPP: could not report pppp_connected to HA: {err}")
 
     @property
     def connected(self):
