@@ -767,3 +767,19 @@ def test_reserve_session_waits_full_stop_timeout_before_yielding():
     assert [name for name, _ in events] == ["stop", "await_stopped", "yield", "start"]
     wait_timeout = dict(events)["await_stopped"]
     assert wait_timeout is not None and wait_timeout >= 15.0
+
+
+def test_pppp_reports_link_state_to_ha(monkeypatch):
+    """pppp_connected is reported to the HA bridge when the link stops."""
+    from types import SimpleNamespace
+    import web
+    from web.service.pppp import PPPPService
+
+    updates = []
+    mqtt = SimpleNamespace(_ha=SimpleNamespace(update_state=lambda **kw: updates.append(kw)))
+    monkeypatch.setattr(web, "get_mqtt_service", lambda printer_index=None: mqtt)
+    svc = PPPPService.__new__(PPPPService)
+    svc.printer_index = 0
+    svc._set_ha_pppp_connected(True)
+    svc.worker_stop()
+    assert updates == [{"pppp_connected": True}, {"pppp_connected": False}]

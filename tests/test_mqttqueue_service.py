@@ -2129,3 +2129,36 @@ def test_worker_stop_without_timelapse_service():
     queue._ha = SimpleNamespace(update_state=lambda **kwargs: None, stop=lambda: None)
 
     queue.worker_stop()
+
+
+def test_mqtt_connected_follows_printer_messages_not_broker_connect():
+    """mqtt_connected turns on with the first message from the printer and off
+    when the worker stops; reaching the broker alone does not set it."""
+    global ha_updates, history_calls, timelapse_calls, events
+    ha_updates, history_calls, timelapse_calls, events = [], [], [], []
+    queue = _queue()
+    queue._ha = SimpleNamespace(update_state=lambda **kwargs: ha_updates.append(kwargs), stop=lambda: None)
+    queue._timelapse = None
+    queue._printer_talking = False
+    queue._last_message_time = time.time()
+    queue._connection_started_at = time.time()
+    queue._last_query = time.time()
+    queue._silent_reconnect_count = 0
+    queue._state_lock = threading.Lock()
+    queue._print_state_event = threading.Event()
+    queue._handle_z_offset_update = lambda obj: None
+    queue._gcode_layer_count = None
+    queue.notify = lambda obj: None
+    queue._forward_to_ha = lambda obj: None
+    queue._handle_notification = lambda obj: None
+    queue.client = SimpleNamespace(
+        fetch=lambda timeout: [(SimpleNamespace(topic="t", payload=b""), [{"commandType": 0}])],
+        query=lambda cmd: None,
+    )
+
+    queue.worker_run(timeout=0)
+    queue.worker_run(timeout=0)
+    assert [u for u in ha_updates if "mqtt_connected" in u] == [{"mqtt_connected": True}]
+
+    queue.worker_stop()
+    assert ha_updates[-1] == {"mqtt_connected": False}

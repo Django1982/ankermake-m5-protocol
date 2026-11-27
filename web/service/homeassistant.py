@@ -253,6 +253,11 @@ class HomeAssistantService:
         # Mark device online
         self._publish(self._availability_topic(), "online", retain=True)
 
+        # Publish the cached state: updates made before the link came up
+        # (e.g. mqtt_connected right after start()) were only cached.
+        with self._lock:
+            self._publish_state()
+
         # Subscribe to command topics (light switch)
         light_cmd_topic = f"{self._topic_prefix}/{self._printer_sn}/light/set"
         client.subscribe(light_cmd_topic, qos=1)
@@ -322,7 +327,7 @@ class HomeAssistantService:
             print_filename, time_elapsed, time_remaining,
             mqtt_connected, pppp_connected, light
         """
-        if not self._enabled or not self._connected:
+        if not self._enabled:
             return
 
         with self._lock:
@@ -332,7 +337,9 @@ class HomeAssistantService:
                     self._state[key] = value
                     changed = True
 
-            if changed:
+            # While the broker link is still coming up the cached state is kept
+            # current; _on_connect() publishes it once connected.
+            if changed and self._connected:
                 self._publish_state()
 
     # ------------------------------------------------------------------

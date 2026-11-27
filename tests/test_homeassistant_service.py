@@ -389,3 +389,26 @@ def test_rapid_reconnect_no_thread_leak():
     svc._stop_event.set()
     if svc._availability_thread:
         svc._availability_thread.join(timeout=2)
+
+
+def test_update_state_before_connect_is_cached_and_published_on_connect(monkeypatch):
+    """An update made while the broker link is still coming up (connect_async)
+    must not be dropped: it is cached and published once connected."""
+    svc = HomeAssistantService(FakeConfigManager(_service_config()), printer_sn="SN123", printer_name="Printer")
+    monkeypatch.setattr(svc, "_register_ha_mjpeg_camera", lambda: None)
+    monkeypatch.setattr(
+        "web.service.homeassistant.threading.Thread",
+        lambda *a, **k: SimpleNamespace(start=lambda: None, is_alive=lambda: False, join=lambda timeout=None: None),
+    )
+    client = FakeMQTTClient()
+    svc._client = client
+    svc._connected = False
+
+    svc.update_state(mqtt_connected=True)
+    assert svc._state["mqtt_connected"] is True
+    assert not any(t.endswith("/state") for t, *_ in client.published)
+
+    svc._on_connect(client, None, None, 0)
+
+    states = [json.loads(p) for t, p, *_ in client.published if t.endswith("/state")]
+    assert states and states[-1]["mqtt_connected"] is True
